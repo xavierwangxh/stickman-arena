@@ -1,0 +1,1221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>火柴人枪枪大战 · 特工 07</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:#0B0D10; overflow:hidden;
+    font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif; }
+  #wrap { height:100%; display:flex; align-items:center; justify-content:center; }
+  canvas { max-width:100vw; max-height:100vh; display:block; cursor:none;
+    box-shadow:0 0 0 1px #2A2F36, 0 24px 70px rgba(0,0,0,.7); }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="1280" height="720"></canvas></div>
+<script>
+'use strict';
+
+/* ============================================================
+   《火柴人枪枪大战 · 特工 07》—— 横版闯关 + 剧情 + 多武器
+   控制：A/D 移动 · W/空格 跳跃（可二段）· 鼠标瞄准 · 左键射击
+        1-6/滚轮/QE 换枪 · R 换弹 · Shift 翻滚闪避 · G 手雷 · P 暂停 · M 静音
+   ============================================================ */
+
+const CV = document.getElementById('cv');
+const X  = CV.getContext('2d');
+const CW = 1280, CH = 720;
+const GROUND = 620;
+
+const COL = {
+  bg:'#12161B', bg2:'#1A2027', far:'#232B34', mid:'#2E3843',
+  plat:'#39434F', platEdge:'#5A6675',
+  line:'#E8EDF2', ink:'#D7DEE6',
+  enemy:'#E2564A', enemyDim:'#8E3A33',
+  ally:'#5DCAA5', gold:'#F0B93C', cyan:'#6FD3E8',
+  danger:'#C0392B', hp:'#4ADE80', hpLow:'#E24B4A', mute:'#7C8894',
+  ui:'rgba(12,15,19,0.82)'
+};
+
+// ============================================================
+//  武器（DPS = 伤害 × 射速；靠弹匣/换弹/散布/穿透做差异化）
+// ============================================================
+const WEAPONS = [
+  {id:0,name:'手枪',   short:'手枪', dmg:26,rate:5.0,spread:2, mag:12,reload:1.0,
+   hitscan:false,pierce:0,pellets:1,knock:120,spd:1500,flash:1.0,
+   tip:'均衡。弹匣小但换弹快，中距离最稳'},
+  {id:1,name:'冲锋枪', short:'冲锋', dmg:14,rate:11, spread:9, mag:30,reload:1.4,
+   hitscan:false,pierce:0,pellets:1,knock:80, spd:1350,flash:0.8,
+   tip:'射速最快，散布大 —— 近战泼水，远距离打不中'},
+  {id:2,name:'霰弹枪', short:'霰弹', dmg:12,rate:1.4,spread:22,mag:6, reload:1.8,
+   hitscan:false,pierce:0,pellets:8,knock:260,spd:1150,flash:1.6,
+   tip:'8 颗弹丸，贴脸一发入魂；空枪换弹要 1.8 秒'},
+  {id:3,name:'突击步枪',short:'步枪',dmg:18,rate:8.0,spread:5, mag:25,reload:1.5,
+   hitscan:false,pierce:0,pellets:1,knock:110,spd:1600,flash:1.1,
+   tip:'万金油。DPS 最高的常规枪，散布可控'},
+  {id:4,name:'狙击枪', short:'狙击', dmg:120,rate:0.7,spread:0.5,mag:5,reload:2.0,
+   hitscan:true, pierce:2, pellets:1,knock:320,spd:0,  flash:2.2,
+   tip:'瞬发射线，贯穿 3 人。单发 120 伤，但换弹慢、射速低'},
+  {id:5,name:'激光枪', short:'激光', dmg:40,rate:3.0,spread:0, mag:8, reload:2.2,
+   hitscan:true, pierce:99,pellets:1,knock:60, spd:0,  flash:1.4,
+   tip:'贯穿一条线上所有目标，适合打排队推进的敌人'}
+];
+
+// ============================================================
+//  敌人
+// ============================================================
+const ETYPE = {
+  guard:{name:'巡逻兵',hp:60, dmg:10,rate:1.1,range:520,speed:90, score:10,
+         pellets:1,spread:6, bspd:760, h:1.0},
+  shield:{name:'盾兵',  hp:150,dmg:12,rate:1.3,range:420,speed:70, score:18,
+         pellets:1,spread:8, bspd:700, h:1.05, frontGuard:0.75},
+  sniper:{name:'狙击手',hp:50, dmg:28,rate:2.2,range:900,speed:60, score:22,
+         pellets:1,spread:1, bspd:1500,h:1.0, charge:1.1},
+  drone:{name:'无人机',hp:40, dmg:8, rate:0.8,range:480,speed:120,score:15,
+         pellets:1,spread:10,bspd:620, h:0.8, fly:true},
+  heavy:{name:'重甲兵',hp:280,dmg:16,rate:1.5,range:400,speed:58, score:30,
+         pellets:3,spread:14,bspd:680, h:1.25, frontGuard:0.35}
+};
+
+const BOSSES = {
+  captain:{name:'守卫队长',hp:1500,dmg:18,score:200,h:1.6},
+  K:      {name:'K',       hp:2200,dmg:20,score:400,h:1.5}
+};
+
+// ============================================================
+//  关卡与剧情
+// ============================================================
+const LEVELS = [
+  {
+    ch:1, name:'码头接头', subtitle:'DOCK 03 · 23:00',
+    width:3700,
+    goal:{type:'reach', x:3480, text:'抵达码头尽头'},
+    briefing:[
+      {who:'总部', t:'07，这里是总部。今晚 23:00，码头三号仓库有一批「深瞳」组件的交接。'},
+      {who:'总部', t:'你的任务：确认货源，拿到清单。'},
+      {who:'总部', t:'注意——这次的接头人，可能不干净。'},
+      {who:'07',   t:'（收到。我一个人去。）'}
+    ],
+    debrief:[
+      {who:'07',   t:'清单到手。'},
+      {who:'07',   t:'但名单上有一个名字，我不该在这里看到。'},
+      {who:'总部', t:'……谁？'},
+      {who:'07',   t:'（关闭了通讯。）'}
+    ],
+    plats:[{x:520,y:520,w:130,h:22},{x:900,y:470,w:150,h:22},{x:1340,y:535,w:170,h:22},
+           {x:1800,y:480,w:130,h:22},{x:2230,y:525,w:160,h:22},{x:2700,y:470,w:190,h:22}],
+    spawns:[{t:'guard',x:700},{t:'guard',x:900},{t:'guard',x:1150},{t:'shield',x:1400},
+            {t:'guard',x:1650},{t:'sniper',x:1850,y:480},{t:'guard',x:2050},
+            {t:'guard',x:2300},{t:'shield',x:2550},{t:'sniper',x:2780,y:470},
+            {t:'guard',x:2950},{t:'guard',x:3150},{t:'guard',x:3350}],
+    unlock:[], boss:null, grenades:0
+  },
+  {
+    ch:2, name:'研究所潜入', subtitle:'BLACKMIRROR LAB B7',
+    width:4300,
+    goal:{type:'collect', n:3, text:'夺取 3 份设计图'},
+    briefing:[
+      {who:'总部', t:'清单指向「黑镜」的地下研究所 B7 区。'},
+      {who:'总部', t:'进去，拿到「深瞳」的完整设计图。'},
+      {who:'总部', t:'如果遇到守卫——不要留下活口。'},
+      {who:'07',   t:'（……这条指令，是谁写的？）'}
+    ],
+    debrief:[
+      {who:'07',   t:'设计图拿到了。'},
+      {who:'总部', t:'报告内容。'},
+      {who:'07',   t:'……深瞳不是武器。'},
+      {who:'07',   t:'它是一双眼睛。'}
+    ],
+    plats:[{x:480,y:520,w:140,h:22},{x:820,y:450,w:160,h:22},{x:1120,y:530,w:150,h:22},
+           {x:1500,y:470,w:180,h:22},{x:1980,y:520,w:150,h:22},{x:2400,y:440,w:170,h:22},
+           {x:2850,y:520,w:160,h:22},{x:3300,y:470,w:180,h:22},{x:3750,y:530,w:150,h:22}],
+    spawns:[{t:'guard',x:600},{t:'drone',x:850,y:380},{t:'guard',x:1050},{t:'guard',x:1250},
+            {t:'shield',x:1500},{t:'drone',x:1750,y:360},{t:'guard',x:1950},
+            {t:'sniper',x:2150,y:520},{t:'guard',x:2400},{t:'heavy',x:2650},
+            {t:'sniper',x:2880,y:520},{t:'guard',x:3100},{t:'shield',x:3350},
+            {t:'drone',x:3600,y:400},{t:'guard',x:3850},{t:'heavy',x:4050}],
+    // 拾取点高度必须贴着可站立面：地面 y=620，站在地上最高只能够到 y≈570
+    pickups:[{x:1100,y:570},{x:2450,y:400},{x:3400,y:570}],
+    unlock:[1], boss:null, grenades:3
+  },
+  {
+    ch:3, name:'列车追逐', subtitle:'NORTH LINE · 02:14',
+    width:4700,
+    goal:{type:'reach', x:4480, text:'活着到下一站'},
+    briefing:[
+      {who:'07',   t:'我带着设计图撤离，但他们在北线列车上布了人。'},
+      {who:'总部', t:'撑到下一站，我们会接应。'},
+      {who:'07',   t:'（通讯器响了。屏幕上是一个字母——K。）'},
+      {who:'07',   t:'（我没有接。）'}
+    ],
+    debrief:[
+      {who:'07',   t:'车厢尽头，那个通讯器又响了。'},
+      {who:'07',   t:'这一次我看了很久，还是没有接。'},
+      {who:'07',   t:'有些电话，接了就回不去了。'}
+    ],
+    plats:[{x:600,y:520,w:160,h:22},{x:1000,y:470,w:170,h:22},{x:1450,y:530,w:160,h:22},
+           {x:1900,y:480,w:180,h:22},{x:2450,y:520,w:170,h:22},{x:3000,y:460,w:190,h:22},
+           {x:3500,y:525,w:170,h:22},{x:4050,y:480,w:180,h:22}],
+    moving:[{x:1300,y:430,w:150,h:20,vx:110,min:1200,max:1700},
+            {x:2700,y:410,w:150,h:20,vx:-130,min:2550,max:3150},
+            {x:3800,y:390,w:150,h:20,vx:150,min:3700,max:4250}],
+    spawns:[{t:'guard',x:750},{t:'guard',x:950},{t:'guard',x:1150},{t:'drone',x:1400,y:380},
+            {t:'heavy',x:1650},{t:'guard',x:1900},{t:'guard',x:2100},{t:'sniper',x:2350,y:520},
+            {t:'guard',x:2600},{t:'sniper',x:3050,y:460},{t:'shield',x:3300},
+            {t:'drone',x:3550,y:350},{t:'guard',x:3800},{t:'heavy',x:4050},
+            {t:'guard',x:4300}],
+    unlock:[2], boss:null, grenades:3
+  },
+  {
+    ch:4, name:'黑镜总部', subtitle:'BLACKMIRROR HQ · 88F',
+    width:5000,
+    goal:{type:'boss', text:'击败守卫队长'},
+    briefing:[
+      {who:'07',   t:'我反追踪 K 的信号，一路摸到了黑镜总部。'},
+      {who:'总部', t:'电梯只到 88 层。上面就是顶层。'},
+      {who:'07',   t:'（88 层有人等着我。）'}
+    ],
+    debrief:[
+      {who:'队长', t:'（喘气）你……以为……她真的叛变了吗？'},
+      {who:'07',   t:'告诉我。'},
+      {who:'队长', t:'她早就……在等你了……'},
+      {who:'07',   t:'（……）'}
+    ],
+    plats:[{x:520,y:520,w:150,h:22},{x:900,y:460,w:170,h:22},{x:1350,y:530,w:160,h:22},
+           {x:1800,y:470,w:180,h:22},{x:2300,y:520,w:170,h:22},{x:2800,y:450,w:190,h:22},
+           {x:3300,y:525,w:170,h:22},{x:3800,y:470,w:180,h:22},{x:4300,y:520,w:200,h:22}],
+    spawns:[{t:'shield',x:650},{t:'guard',x:850},{t:'guard',x:1050},{t:'sniper',x:1250,y:530},
+            {t:'drone',x:1500,y:380},{t:'heavy',x:1750},{t:'guard',x:1950},{t:'shield',x:2200},
+            {t:'guard',x:2400},{t:'sniper',x:2650,y:450},{t:'shield',x:2900},
+            {t:'sniper',x:3150,y:525},{t:'drone',x:3400,y:390},{t:'heavy',x:3650},
+            {t:'guard',x:3900},{t:'shield',x:4150},{t:'guard',x:4350}],
+    unlock:[3], boss:'captain', bossX:4400, grenades:4
+  },
+  {
+    ch:5, name:'顶层对决', subtitle:'THE TOP FLOOR · 03:41',
+    width:2600,
+    goal:{type:'boss', text:'击败 K'},
+    briefing:[
+      {who:'07',   t:'顶层。落地窗，整座城市的夜景。'},
+      {who:'07',   t:'有一个人背对着我。'},
+      {who:'K',    t:'你来了。'},
+      {who:'07',   t:'……K。'},
+      {who:'K',    t:'07，你太慢了。深瞳昨天就上线了。'},
+      {who:'07',   t:'那你为什么还站在这里？'},
+      {who:'K',    t:'因为最后要关掉它的那个人——必须是你。'}
+    ],
+    debrief:[
+      {who:'07',   t:'深瞳的开关在我手里。'},
+      {who:'总部', t:'07？报告！执行清除指令！'},
+      {who:'07',   t:'（看了一眼名单上自己的名字。）'},
+      {who:'07',   t:'……我没有按下去。'},
+      {who:'总部', t:'……'},
+      {who:'07',   t:'任务完成。告诉他们，07 已经不存在了。'}
+    ],
+    plats:[{x:300,y:500,w:170,h:22},{x:700,y:430,w:180,h:22},{x:1150,y:500,w:170,h:22},
+           {x:1600,y:430,w:180,h:22},{x:2050,y:500,w:190,h:22}],
+    spawns:[],
+    unlock:[4,5], boss:'K', bossX:1300, grenades:4
+  }
+];
+
+// ============================================================
+//  状态
+// ============================================================
+let T=0, DT=0, paused=false, muted=false;
+let screen='title';      // title | story | play | clear | over | win
+let keys={}, keysOnce={};
+const mouse={x:CW/2,y:CH/2,down:false,downOnce:false};
+
+const P = {
+  x:120, y:GROUND, vx:0, vy:0, onGround:true, face:1, jumps:0,
+  hp:100, hpMax:100,
+  weapon:0, owned:[true,false,false,false,false,false],
+  ammo:[12,30,6,25,5,8], reloading:0, fireCd:0,
+  grenades:0, grenadeCd:0,
+  dash:0, dashCd:0, invuln:0,
+  aim:0, hurtFlash:0, anim:0, lastSafeX:120
+};
+
+let L=null, LIdx=0;
+let enemies=[], bullets=[], beams=[], parts=[], floats=[], pickups=[], drones=[];
+let camX=0, shake=0, muzzle=0;
+let storyLines=[], storyIdx=0, storyMode='brief';
+let killed=0, collected=0, bossRef=null, goalDone=false;
+let hint='', hintT=0;
+
+// ============================================================
+//  工具
+// ============================================================
+function rnd(){ return Math.random(); }
+function rr(a,b){ return a+Math.random()*(b-a); }
+function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
+function d2(ax,ay,bx,by){ const dx=ax-bx,dy=ay-by; return dx*dx+dy*dy; }
+function W(){ return WEAPONS[P.weapon]; }
+function once(k){ if(keysOnce[k]){keysOnce[k]=false; return true;} return false; }
+
+// ============================================================
+//  输入
+// ============================================================
+addEventListener('keydown', e=>{
+  const k=e.key.length===1?e.key.toLowerCase():e.key;
+  keys[k]=true; keysOnce[k]=true;
+  if([' ','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) e.preventDefault();
+});
+addEventListener('keyup', e=>{ const k=e.key.length===1?e.key.toLowerCase():e.key; keys[k]=false; });
+function canvasPos(e){
+  const r=CV.getBoundingClientRect();
+  return { x:(e.clientX-r.left)*(CW/r.width), y:(e.clientY-r.top)*(CH/r.height) };
+}
+CV.addEventListener('mousemove', e=>{ const p=canvasPos(e); mouse.x=p.x; mouse.y=p.y; });
+CV.addEventListener('mousedown', e=>{ if(e.button===0){ mouse.down=true; mouse.downOnce=true; } });
+addEventListener('mouseup', e=>{ if(e.button===0) mouse.down=false; });
+CV.addEventListener('contextmenu', e=>e.preventDefault());
+CV.addEventListener('wheel', e=>{
+  e.preventDefault();
+  const dir = e.deltaY>0?1:-1;
+  for(let i=1;i<=6;i++){
+    const n=(P.weapon+dir*i+6*6)%6;
+    if(P.owned[n]){ P.weapon=n; P.reloading=0; refreshAmmoHud(); break; }
+  }
+}, {passive:false});
+
+function refreshAmmoHud(){ /* 预留 */ }
+
+// ============================================================
+//  关卡装载
+// ============================================================
+function loadLevel(i){
+  LIdx=i; L=LEVELS[i];
+  enemies=[]; bullets=[]; beams=[]; parts=[]; floats=[]; pickups=[]; drones=[];
+  P.x=120; P.y=GROUND; P.vx=0; P.vy=0; P.onGround=true; P.jumps=0;
+  P.hp=P.hpMax; P.reloading=0; P.fireCd=0; P.grenadeCd=0; P.dash=0; P.dashCd=0; P.invuln=0;
+  P.grenades=L.grenades;
+  for(const u of L.unlock) P.owned[u]=true;
+  if(!P.owned[P.weapon]) P.weapon=0;
+  for(const w of WEAPONS) P.ammo[w.id]=w.mag;
+  killed=0; collected=0; bossRef=null; goalDone=false; camX=0;
+  for(const s of L.spawns) spawnEnemy(s.t, s.x, s.y===undefined?GROUND:s.y);
+  if(L.pickups) for(const p of L.pickups) pickups.push({x:p.x,y:p.y,taken:false});
+  if(L.moving) for(const m of L.moving) drones.push({...m, dir:m.vx>0?1:-1});
+  screen='play';
+}
+function startStory(i, mode){
+  L=LEVELS[i];
+  storyMode=mode; storyIdx=0;
+  storyLines = mode==='brief' ? L.briefing : L.debrief;
+  screen='story';
+}
+function spawnEnemy(t,x,y){
+  const c=ETYPE[t];
+  enemies.push({t:t,c:c,x:x,y:y||GROUND,hp:c.hp,hpMax:c.hp,face:-1,
+    cd:rr(0.3,1.2),charge:0,dead:false,flash:0,anim:rr(0,6),
+    patrol:rr(0,6), baseY: y||GROUND, active:false, hurtT:0});
+}
+function spawnBoss(key,x){
+  const c=BOSSES[key];
+  const b={t:'boss',key:key,c:c,x:x,y:GROUND,hp:c.hp,hpMax:c.hp,face:-1,
+    cd:1.2,phase:1,dead:false,flash:0,anim:0,active:true,hurtT:0,dashT:0,teleT:0};
+  enemies.push(b); bossRef=b;
+  hint='目标出现：'+c.name; hintT=3;
+  return b;
+}
+
+// ============================================================
+//  玩家
+// ============================================================
+function updatePlayer(dt){
+  const sp = 300;
+  let mv=0;
+  if(keys['a']||keys['ArrowLeft']) mv-=1;
+  if(keys['d']||keys['ArrowRight']) mv+=1;
+
+  // 翻滚闪避：0.3s 无敌，1.2s 冷却
+  if(P.dashCd>0) P.dashCd-=dt;
+  if((once('Shift')) && P.dash<=0 && P.dashCd<=0 && screen==='play'){
+    P.dash=0.28; P.dashCd=1.2; P.invuln=Math.max(P.invuln,0.32);
+    P.vx = (mv!==0?mv:P.face)*760;
+    for(let i=0;i<8;i++) puff(P.x,P.y-20,'#6FD3E8');
+  }
+  if(P.dash>0){
+    P.dash-=dt;
+    P.vx *= 0.90;
+  } else {
+    P.vx = mv*sp;
+  }
+  if(mv!==0 && P.dash<=0) P.face=mv;
+  P.x += P.vx*dt;
+
+  // 跳跃 + 二段跳
+  if((once('w')||once(' ') || once('ArrowUp')) && screen==='play'){
+    if(P.onGround){ P.vy=-700; P.onGround=false; P.jumps=1; }
+    else if(P.jumps<2){ P.vy=-600; P.jumps=2; for(let i=0;i<6;i++) puff(P.x,P.y,'#5A6675'); }
+  }
+  P.vy += 2000*dt;
+  P.y += P.vy*dt;
+
+  // 站立判定（地面 + 平台 + 移动平台）
+  let onPlat=null;
+  if(P.vy>=0){
+    if(P.y>=GROUND){ P.y=GROUND; P.vy=0; P.onGround=true; P.jumps=0; onPlat=true; }
+    if(!onPlat) for(const pl of L.plats||[]){
+      if(P.x>pl.x-14 && P.x<pl.x+pl.w+14 && P.y>=pl.y-2 && P.y<=pl.y+34 &&
+         (P.lastY===undefined || P.lastY<=pl.y+6)){
+        P.y=pl.y; P.vy=0; P.onGround=true; P.jumps=0; onPlat=true; break;
+      }
+    }
+    if(!onPlat) for(const m of drones){
+      if(P.x>m.x-14 && P.x<m.x+m.w+14 && P.y>=m.y-2 && P.y<=m.y+30 &&
+         (P.lastY===undefined || P.lastY<=m.y+6)){
+        P.y=m.y; P.vy=0; P.onGround=true; P.jumps=0;
+        P.x += m.vx*dt;                 // 跟着车厢走
+        onPlat=true; break;
+      }
+    }
+    if(!onPlat) P.onGround=false;
+  } else P.onGround=false;
+  P.lastY=P.y;
+
+  P.x = clamp(P.x, 40, L.width-40);
+  if(P.y>820){ P.y=GROUND; P.x=P.lastSafeX; hurtPlayer(15); }
+  if(P.onGround && Math.abs(P.vx)>10) P.lastSafeX=P.x;
+
+  // 瞄准
+  P.aim = Math.atan2((mouse.y+0)-(P.y-38), (mouse.x+camX)-P.x);
+  if(Math.cos(P.aim)>=0) P.face=1; else P.face=-1;
+
+  // 射击
+  if(P.reloading>0){
+    P.reloading-=dt;
+    if(P.reloading<=0) P.ammo[P.weapon]=W().mag;
+  }
+  if(P.fireCd>0) P.fireCd-=dt;
+  const w=W();
+  if(mouse.down && P.reloading<=0 && P.fireCd<=0 && screen==='play'){
+    if(P.ammo[w.id]>0){ fire(); }
+    else { P.reloading=w.reload; }
+  }
+  if((once('r')) && P.reloading<=0 && P.ammo[w.id]<w.mag) P.reloading=w.reload;
+
+  // 换枪
+  for(let i=0;i<6;i++) if(once(String(i+1)) && P.owned[i]){ P.weapon=i; P.reloading=0; }
+  if(once('q')||once('e')){
+    const dir = once('q')?-1:1;
+    for(let i=1;i<=6;i++){ const n=(P.weapon+dir*i+36)%6; if(P.owned[n]){P.weapon=n;P.reloading=0;break;} }
+  }
+  // 手雷
+  if(P.grenadeCd>0) P.grenadeCd-=dt;
+  if(once('g') && P.grenades>0 && P.grenadeCd<=0){
+    P.grenades--; P.grenadeCd=0.6;
+    bullets.push({x:P.x,y:P.y-38,vx:Math.cos(P.aim)*700,vy:Math.sin(P.aim)*700-220,
+      dmg:0,life:2.2,friendly:true,grenade:true,r:7});
+  }
+
+  if(P.invuln>0) P.invuln-=dt;
+  if(P.hurtFlash>0) P.hurtFlash-=dt;
+  P.anim += dt*(Math.abs(P.vx)>10?10:3);
+}
+
+function fire(){
+  const w=W();
+  P.ammo[w.id]--;
+  P.fireCd = 1/w.rate;
+  muzzle = 0.07;
+  shake = Math.max(shake, w.flash*2.2);
+  const mx=P.x+Math.cos(P.aim)*30, my=P.y-38+Math.sin(P.aim)*30;
+  // 射线类武器（狙击/激光）**不再生成子弹实体**：否则射线命中一次、
+  // 子弹再命中一次，同一发会结算两遍伤害。两者只能走一条路径。
+  if(!w.hitscan){
+    for(let i=0;i<w.pellets;i++){
+      const a = P.aim + (rnd()-0.5)*w.spread*Math.PI/180;
+      bullets.push({x:mx,y:my,vx:Math.cos(a)*w.spd,vy:Math.sin(a)*w.spd,
+        dmg:w.dmg,life:1.6,friendly:true,pierce:w.pierce,hit:null,grenade:false,r:3});
+    }
+  } else {
+    const ex=P.x+Math.cos(P.aim)*1900, ey=P.y-38+Math.sin(P.aim)*1900;
+    beams.push({x1:mx,y1:my,x2:ex,y2:ey,t:0,life:0.09,
+      cyan:w.id===5});
+    let n=0;
+    const hits=[];
+    for(const e of enemies){
+      if(e.dead) continue;
+      const p = segPoint(e.x, e.y-34*e.c.h, mx,my,ex,ey, 26);
+      if(p) hits.push({e:e,d:p.d});
+    }
+    hits.sort((a,b)=>a.d-b.d);
+    for(const h of hits){
+      if(n>=w.pierce+1 && w.pierce<90) break;
+      damageEnemy(h.e, w.dmg, mx, my, w.knock);
+      n++;
+    }
+  }
+  // 抛壳 + 枪口焰
+  for(let i=0;i<3;i++) puff(mx,my,w.id===5?'#6FD3E8':'#F0B93C');
+  sfx(w.id===2?'shotgun':(w.id>=4?'sniper':'shot'));
+}
+
+function segPoint(px,py,ax,ay,bx,by,rad){
+  const dx=bx-ax, dy=by-ay, L2=dx*dx+dy*dy;
+  let t = L2>0 ? ((px-ax)*dx+(py-ay)*dy)/L2 : 0;
+  t=clamp(t,0,1);
+  const cx=ax+t*dx, cy=ay+t*dy;
+  const d=Math.hypot(px-cx,py-cy);
+  return d<rad ? {d:Math.hypot(px-ax,py-ay)} : null;
+}
+
+// ============================================================
+//  敌人
+// ============================================================
+function updateEnemies(dt){
+  for(let i=enemies.length-1;i>=0;i--){
+    const e=enemies[i];
+    if(e.dead){ enemies.splice(i,1); continue; }
+    if(e.flash>0) e.flash-=dt;
+    if(e.hurtT>0) e.hurtT-=dt;
+
+    // 只有进入 800px 才激活（避免全关一起冲过来）
+    if(!e.active && Math.abs(e.x-P.x)<900) e.active=true;
+    if(!e.active) continue;
+
+    const dist = e.x-P.x;
+    const adist = Math.abs(dist);
+    e.face = dist>0 ? -1 : 1;
+    e.anim += dt*(Math.abs(e.vx||0)>5?8:2);
+
+    if(e.t==='boss'){ updateBoss(e,dt); continue; }
+
+    // 移动 AI：保持在射程带内
+    const want = e.c.range*0.72;
+    if(e.c.fly){
+      const ty = e.baseY-120 + Math.sin(T*2+e.patrol)*26;
+      e.y += (ty-e.y)*Math.min(1,dt*2);
+      if(adist>want) e.x -= Math.sign(dist)*(adist-want)*Math.min(1,dt*1.2)*e.c.speed/90;
+    } else {
+      if(adist>want+40) e.x -= Math.sign(dist)*e.c.speed*dt*0.7;
+      else if(adist<want-120) e.x += Math.sign(dist)*e.c.speed*dt*0.5;
+      e.y = e.baseY;
+    }
+    e.x = clamp(e.x, 60, L.width-60);
+
+    // 开火
+    e.cd-=dt;
+    if(adist<e.c.range && e.cd<=0){
+      if(e.c.charge){
+        e.charge+=dt;
+        if(e.charge>=e.c.charge){
+          e.charge=0; e.cd=e.c.rate; shootAt(e);
+        }
+      } else { e.cd=e.c.rate; shootAt(e); }
+    }
+  }
+}
+function shootAt(e){
+  const ey = e.y-34*e.c.h;
+  const a = Math.atan2((P.y-38)-ey, P.x-e.x);
+  for(let i=0;i<(e.c.pellets||1);i++){
+    const aa=a+(rnd()-0.5)*e.c.spread*Math.PI/180;
+    bullets.push({x:e.x,y:ey,vx:Math.cos(aa)*e.c.bspd,vy:Math.sin(aa)*e.c.bspd,
+      dmg:e.c.dmg,life:2.4,friendly:false,pierce:0,grenade:false,r:4});
+  }
+  puff(e.x+Math.cos(a)*20, ey+Math.sin(a)*20, COL.danger);
+}
+function updateBoss(b,dt){
+  b.cd-=dt;
+  const dist=b.x-P.x, adist=Math.abs(dist);
+  b.face = dist>0?-1:1;
+  // 阶段
+  const frac=b.hp/b.hpMax;
+  b.phase = frac>0.6?1:(frac>0.3?2:3);
+
+  if(b.key==='K'){
+    // K：瞬移 + 突进射击
+    b.teleT-=dt;
+    if(b.teleT<=0 && adist<260){
+      b.x = P.x + (rnd()<0.5?-1:1)*rr(320,520);
+      b.x=clamp(b.x,80,L.width-80);
+      b.teleT=rr(2.4,3.6);
+      for(let i=0;i<10;i++) puff(b.x,b.y-40,'#C9A0FF');
+    }
+    if(b.dashT>0){
+      b.dashT-=dt; b.x += b.face*520*dt;
+    } else if(b.cd<=0){
+      const mode = b.phase===1?0:(b.phase===2?1:2);
+      if(mode===0){ shootAt(b); b.cd=rr(0.9,1.3); }
+      else if(mode===1){ shootAt(b); b.cd=rr(0.6,0.9); }
+      else { shootAt(b); b.dashT=0.35; b.cd=rr(1.1,1.6); }
+    }
+  } else {
+    // 守卫队长：霰弹三连 + 推进
+    if(adist>260) b.x -= Math.sign(dist)*70*dt;
+    if(b.cd<=0){
+      const n = b.phase===1?1:(b.phase===2?2:3);
+      for(let i=0;i<n;i++){
+        const a=Math.atan2((P.y-38)-(b.y-40),P.x-b.x)+(rnd()-0.5)*0.16;
+        bullets.push({x:b.x,y:b.y-40,vx:Math.cos(a)*680,vy:Math.sin(a)*680,
+          dmg:b.c.dmg,life:2.4,friendly:false,pierce:0,grenade:false,r:5});
+      }
+      b.cd = b.phase===3?rr(0.8,1.1):rr(1.2,1.6);
+    }
+  }
+  b.x=clamp(b.x,80,L.width-80);
+}
+
+function damageEnemy(e,dmg,fx,fy,knock){
+  if(e.dead) return;
+  // 盾兵正面减伤：从背后或上方打才不减
+  if(e.c.frontGuard){
+    const toE=Math.atan2((e.y-34*e.c.h)-fy, e.x-fx);
+    const facing = e.face>0?0:Math.PI;
+    if(Math.abs(((toE-facing+Math.PI*3)%(Math.PI*2))-Math.PI)>Math.PI*0.45){
+      dmg = dmg*(1-e.c.frontGuard);
+    }
+    if(fy < e.y-60*e.c.h) dmg = dmg/(1-e.c.frontGuard);   // 从上方打不减伤
+  }
+  e.hp -= dmg; e.flash=0.08; e.hurtT=0.12;
+  floats.push({v:Math.round(dmg),x:e.x+rr(-8,8),y:e.y-60*e.c.h-10,t:0,life:0.7});
+  if(knock && !e.c.fly && e.t!=='boss') e.x += Math.cos(Math.atan2(e.y-fy,e.x-fx))*knock*0.02;
+  for(let i=0;i<4;i++) puff(e.x,e.y-34*e.c.h,COL.danger);
+  if(e.hp<=0){
+    e.dead=true; killed++;
+    for(let i=0;i<10;i++) puff(e.x,e.y-34*e.c.h,COL.enemy);
+    if(e.t==='boss'){
+      goalDone=true;
+      hint='目标已清除'; hintT=3;
+    }
+  }
+  sfx('hit');
+}
+
+// ============================================================
+//  子弹 / 爆炸
+// ============================================================
+function updateBullets(dt){
+  for(let i=bullets.length-1;i>=0;i--){
+    const b=bullets[i];
+    b.life-=dt;
+    if(b.grenade){
+      b.vy+=1400*dt;
+      b.x+=b.vx*dt; b.y+=b.vy*dt;
+      if(b.y>=GROUND){ b.y=GROUND; b.vy*=-0.35; b.vx*=0.6; }
+      if(b.life<=0){ explode(b.x,b.y); bullets.splice(i,1); continue; }
+      continue;
+    }
+    b.x+=b.vx*dt; b.y+=b.vy*dt;
+    let gone=false;
+    if(b.friendly){
+      for(const e of enemies){
+        if(e.dead) continue;
+        const ey=e.y-34*e.c.h;
+        if(d2(b.x,b.y,e.x,ey) < (22+14*e.c.h)**2){
+          damageEnemy(e,b.dmg,b.x,b.y,0);
+          if(b.pierce>0){ b.pierce--; } else { gone=true; }
+          break;
+        }
+      }
+    } else {
+      if(d2(b.x,b.y,P.x,P.y-38) < 24*24){
+        hurtPlayer(b.dmg); gone=true;
+      }
+    }
+    // 撞平台
+    if(!gone){
+      for(const pl of L.plats||[]){
+        if(b.x>pl.x&&b.x<pl.x+pl.w&&b.y>pl.y-6&&b.y<pl.y+pl.h+8){ gone=true; puff(b.x,b.y,'#8A94A0'); break; }
+      }
+      if(b.y>=GROUND-2){ gone=true; puff(b.x,GROUND,'#8A94A0'); }
+    }
+    if(gone||b.life<=0||b.x<-200||b.x>L.width+200) bullets.splice(i,1);
+  }
+}
+function explode(x,y){
+  shake=Math.max(shake,12);
+  for(let i=0;i<24;i++) puff(x+rr(-30,30),y+rr(-30,30),COL.gold);
+  for(const e of enemies){
+    if(e.dead) continue;
+    const d=Math.hypot(e.x-x,(e.y-34*e.c.h)-y);
+    if(d<190) damageEnemy(e, Math.round(150*(1-d/190)), x, y, 0);
+  }
+  sfx('boom');
+}
+
+// ============================================================
+//  玩家受伤 / 目标
+// ============================================================
+function hurtPlayer(d){
+  if(P.invuln>0) return;
+  P.hp-=d; P.hurtFlash=0.3; P.invuln=0.6;
+  shake=Math.max(shake,8);
+  sfx('hurt');
+  if(P.hp<=0){ P.hp=0; screen='over'; }
+}
+function checkGoal(){
+  if(goalDone) return;
+  const g=L.goal;
+  if(g.type==='reach' && P.x>=g.x) goalDone=true;
+  else if(g.type==='collect' && collected>=g.n) goalDone=true;
+  else if(g.type==='boss' && bossRef && bossRef.dead) goalDone=true;
+  if(goalDone){ hint='任务完成'; hintT=3; }
+}
+function finishLevel(){
+  if(LIdx>=LEVELS.length-1){ screen='win'; return; }
+  startStory(LIdx,'debrief');
+  pendingNext = LIdx+1;
+}
+let pendingNext = -1;
+
+// ============================================================
+//  粒子 / 飘字
+// ============================================================
+function puff(x,y,c){
+  parts.push({x:x,y:y,vx:rr(-140,140),vy:rr(-180,60),t:0,life:rr(0.25,0.5),c:c,r:rr(2,4)});
+}
+function updateParts(dt){
+  for(let i=parts.length-1;i>=0;i--){
+    const p=parts[i]; p.t+=dt;
+    p.vy+=520*dt; p.x+=p.vx*dt; p.y+=p.vy*dt;
+    if(p.t>=p.life) parts.splice(i,1);
+  }
+  for(let i=floats.length-1;i>=0;i--){
+    const f=floats[i]; f.t+=dt; if(f.t>=f.life) floats.splice(i,1);
+  }
+  for(let i=beams.length-1;i>=0;i--){
+    const b=beams[i]; b.t+=dt; if(b.t>=b.life) beams.splice(i,1);
+  }
+}
+
+// ============================================================
+//  音效
+// ============================================================
+let AC=null; const lastSfx={};
+function sfx(k){
+  if(muted) return;
+  if(lastSfx[k] && T-lastSfx[k]<0.05) return;
+  lastSfx[k]=T;
+  try{
+    if(!AC) AC=new (window.AudioContext||window.webkitAudioContext)();
+    const o=AC.createOscillator(), g=AC.createGain();
+    const m={shot:[180,0.06,'square',0.045],shotgun:[90,0.16,'sawtooth',0.07],
+             sniper:[420,0.12,'triangle',0.06],hit:[300,0.04,'square',0.03],
+             hurt:[120,0.18,'sawtooth',0.08],boom:[60,0.4,'sawtooth',0.09],
+             pick:[800,0.1,'sine',0.05]}[k]||[300,0.05,'sine',0.04];
+    o.type=m[2]; o.frequency.value=m[0];
+    o.frequency.exponentialRampToValueAtTime(Math.max(40,m[0]*0.4),AC.currentTime+m[1]);
+    g.gain.setValueAtTime(m[3],AC.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001,AC.currentTime+m[1]);
+    o.connect(g); g.connect(AC.destination); o.start(); o.stop(AC.currentTime+m[1]+0.02);
+  }catch(err){}
+}
+
+// ============================================================
+//  绘制：火柴人
+// ============================================================
+function stick(x,y,face,anim,scale,color,lw){
+  const s=scale||1, w=lw||3.2/s;
+  X.save(); X.translate(x,y); X.scale(face*s,s);
+  X.strokeStyle=color; X.lineWidth=w; X.lineCap='round'; X.lineJoin='round';
+  const swing = Math.sin(anim)*0.55;
+  // 腿
+  X.beginPath();
+  X.moveTo(0,0); X.lineTo(swing*14,-20);
+  X.moveTo(0,0); X.lineTo(-swing*14,-20);
+  X.stroke();
+  // 躯干
+  X.beginPath(); X.moveTo(0,0); X.lineTo(2,-38); X.stroke();
+  // 头
+  X.beginPath(); X.arc(4,-48,8.5,0,6.2832);
+  X.fillStyle=color; X.fill();
+  X.restore();
+}
+function stickArmed(x,y,face,anim,scale,color,aim,gunLen,lw){
+  const s=scale||1;
+  X.save(); X.translate(x,y); X.scale(face*s,s);
+  X.strokeStyle=color; X.lineWidth=(lw||3.2)/s; X.lineCap='round'; X.lineJoin='round';
+  const swing=Math.sin(anim)*0.5;
+  X.beginPath();
+  X.moveTo(0,0); X.lineTo(swing*14,-20);
+  X.moveTo(0,0); X.lineTo(-swing*14,-20);
+  X.stroke();
+  X.beginPath(); X.moveTo(0,0); X.lineTo(2,-38); X.stroke();
+  X.beginPath(); X.arc(4,-48,8.5,0,6.2832); X.fillStyle=color; X.fill();
+  // 持枪手臂朝向准星（世界角度 -> 本地需翻转）
+  const la = face>0 ? aim : (Math.PI-aim);
+  const sx=2+(face>0?0:4), sy=-30;
+  const hx=sx+Math.cos(la)*16, hy=sy+Math.sin(la)*16;
+  X.beginPath(); X.moveTo(1,-32); X.lineTo(hx,hy); X.stroke();
+  // 枪
+  X.strokeStyle='#9AA6B4'; X.lineWidth=4/s;
+  X.beginPath(); X.moveTo(hx,hy); X.lineTo(hx+Math.cos(la)*gunLen, hy+Math.sin(la)*gunLen); X.stroke();
+  X.restore();
+}
+
+// ============================================================
+//  绘制：场景
+// ============================================================
+function drawWorld(){
+  // 天空 / 背景
+  X.fillStyle=COL.bg; X.fillRect(0,0,CW,CH);
+  // 远景楼群（视差）
+  X.fillStyle=COL.far;
+  const ox=-(camX*0.25)%260;
+  for(let i=-1;i<8;i++){
+    const bx=i*260+ox, hh=140+((i*97)%5)*60;
+    X.fillRect(bx, GROUND-hh, 200, hh);
+  }
+  X.fillStyle=COL.mid;
+  const ox2=-(camX*0.5)%200;
+  for(let i=-1;i<10;i++){
+    const bx=i*200+ox2, hh=80+((i*61)%4)*45;
+    X.fillRect(bx, GROUND-hh, 150, hh);
+  }
+  // 窗灯
+  X.fillStyle='rgba(240,185,60,0.18)';
+  const ox3=-(camX*0.5)%200;
+  for(let i=-1;i<10;i++){
+    const bx=i*200+ox3;
+    for(let r=0;r<3;r++) for(let c=0;c<3;c++)
+      if(((i*7+r*3+c)%5)<2) X.fillRect(bx+18+c*40, GROUND-70-r*40, 18, 22);
+  }
+  // 地面
+  X.fillStyle=COL.platEdge; X.fillRect(-camX,GROUND,L.width,8);
+  X.fillStyle='#1B2129'; X.fillRect(-camX,GROUND+8,L.width,CH-GROUND);
+  X.strokeStyle='rgba(120,134,150,0.18)'; X.lineWidth=2;
+  for(let gx=0; gx<L.width; gx+=120){
+    X.beginPath(); X.moveTo(gx-camX,GROUND+8); X.lineTo(gx-camX,CH); X.stroke();
+  }
+  // 平台
+  for(const pl of L.plats||[]){
+    X.fillStyle=COL.plat; X.fillRect(pl.x-camX,pl.y,pl.w,pl.h);
+    X.fillStyle=COL.platEdge; X.fillRect(pl.x-camX,pl.y,pl.w,4);
+    X.strokeStyle='rgba(12,15,19,0.8)'; X.lineWidth=2;
+    X.strokeRect(pl.x-camX,pl.y,pl.w,pl.h);
+  }
+  // 移动平台（列车车厢）
+  for(const m of drones){
+    X.fillStyle='#4A5665'; X.fillRect(m.x-camX,m.y,m.w,m.h);
+    X.fillStyle=COL.cyan; X.fillRect(m.x-camX,m.y,m.w,3);
+    X.fillStyle='#2A323C';
+    for(let i=0;i<3;i++) X.fillRect(m.x-camX+18+i*45, m.y+m.h, 8, 12);
+  }
+  // 情报拾取
+  for(const p of pickups){
+    if(p.taken) continue;
+    const bob=Math.sin(T*3+p.x)*5;
+    X.save(); X.translate(p.x-camX,p.y-20+bob);
+    X.fillStyle=COL.cyan; X.strokeStyle=COL.line; X.lineWidth=2;
+    X.beginPath(); X.rect(-12,-14,24,28); X.fill(); X.stroke();
+    X.fillStyle='#0B0D10';
+    X.fillRect(-7,-8,14,3); X.fillRect(-7,-1,14,3); X.fillRect(-7,6,9,3);
+    X.restore();
+  }
+  // 终点标记
+  if(L.goal.type==='reach'){
+    const gx=L.goal.x;
+    X.strokeStyle=goalDone?COL.hp:COL.gold; X.lineWidth=3;
+    X.beginPath(); X.moveTo(gx-camX,GROUND); X.lineTo(gx-camX,GROUND-120); X.stroke();
+    X.fillStyle=goalDone?COL.hp:COL.gold;
+    X.beginPath(); X.moveTo(gx-camX,GROUND-140); X.lineTo(gx-camX+22,GROUND-120);
+    X.lineTo(gx-camX,GROUND-100); X.closePath(); X.fill();
+  }
+}
+
+function drawPlayer(){
+  const px=P.x-camX, py=P.y;
+  const w=W();
+  const gl = w.id===4?34:(w.id===5?30:(w.id===2?24:20));
+  if(P.dash>0){
+    X.globalAlpha=0.45;
+    stick(px- P.face*26, py, P.face, P.anim, 1, COL.cyan, 3.2);
+    X.globalAlpha=1;
+  }
+  const col = P.hurtFlash>0 ? '#FFFFFF' : (P.invuln>0 ? '#9FE1CB' : COL.ink);
+  stickArmed(px,py,P.face,P.anim,1,col,P.aim,gl,3.2);
+  // 枪口焰
+  if(muzzle>0){
+    const mx=px+Math.cos(P.aim)*(gl+16), my=py-38+Math.sin(P.aim)*(gl+16);
+    X.fillStyle=w.id===5?'#BFF3FF':'#FFE08A';
+    X.beginPath(); X.arc(mx,my,7+w.flash*4,0,6.2832); X.fill();
+  }
+}
+
+function drawEnemies(){
+  for(const e of enemies){
+    if(e.dead) continue;
+    const ex=e.x-camX, ey=e.y;
+    if(ex<-120||ex>CW+120) continue;
+    const col = e.flash>0?'#FFFFFF':(e.t==='boss'?(e.key==='K'?'#C9A0FF':COL.gold):COL.enemy);
+    const sc = e.c.h||1;
+    if(e.t==='drone'){
+      // 无人机：小飞行器
+      X.fillStyle='#4A5665'; X.fillRect(ex-16,ey-56,32,12);
+      X.strokeStyle=col; X.lineWidth=2.5;
+      X.beginPath(); X.moveTo(ex-16,ey-56); X.lineTo(ex-24,ey-70);
+      X.moveTo(ex+16,ey-56); X.lineTo(ex+24,ey-70); X.stroke();
+      X.fillStyle=col; X.beginPath(); X.arc(ex,ey-48,6,0,6.2832); X.fill();
+    } else {
+      stickArmed(ex,ey,e.face,e.anim,sc,col,Math.atan2((P.y-38)-(ey-34*sc),P.x-e.x),
+                  e.t==='sniper'?30:18,3.0/sc);
+      if(e.t==='shield'){
+        X.fillStyle='rgba(180,190,205,0.55)'; X.strokeStyle='#9AA6B4'; X.lineWidth=2.5;
+        const bx=ex+e.face*16;
+        X.beginPath(); X.rect(bx-7,ey-58*sc,14,46*sc); X.fill(); X.stroke();
+      }
+      if(e.t==='heavy'){
+        X.fillStyle='rgba(150,160,175,0.45)';
+        X.beginPath(); X.ellipse(ex,ey-34*sc,13,20,0,0,6.2832); X.fill();
+      }
+      if(e.c.charge && e.charge>0){
+        // 狙击预警线
+        X.strokeStyle='rgba(226,75,74,'+(0.25+e.charge)+')'; X.lineWidth=1.5;
+        X.beginPath(); X.moveTo(ex,ey-34*sc);
+        X.lineTo(P.x-camX,P.y-38); X.stroke();
+      }
+    }
+    // 血条（精英/BOSS）
+    if(e.c.hp>=140){
+      const bw=e.t==='boss'?220:56, frac=clamp(e.hp/e.hpMax,0,1);
+      X.fillStyle='rgba(12,15,19,0.8)'; X.fillRect(ex-bw/2,ey-78*sc,bw,6);
+      X.fillStyle=e.t==='boss'?COL.gold:COL.hp;
+      X.fillRect(ex-bw/2,ey-78*sc,bw*frac,6);
+      if(e.t==='boss'){
+        X.fillStyle=COL.line; X.font='500 16px sans-serif'; X.textAlign='center';
+        X.fillText(e.c.name+(e.phase>1?' · 第'+e.phase+'阶段':''), ex, ey-86*sc);
+      }
+    }
+  }
+}
+
+function drawBullets(){
+  for(const b of bullets){
+    const bx=b.x-camX, by=b.y;
+    if(b.grenade){
+      X.fillStyle='#4ADE80'; X.strokeStyle=COL.line; X.lineWidth=2;
+      X.beginPath(); X.arc(bx,by,7,0,6.2832); X.fill(); X.stroke();
+      continue;
+    }
+    if(b.friendly){
+      X.strokeStyle=b.dmg>=100?'#BFF3FF':'#FFE08A'; X.lineWidth=3;
+      X.beginPath(); X.moveTo(bx,by); X.lineTo(bx-b.vx*0.016,by-b.vy*0.016); X.stroke();
+    } else {
+      X.fillStyle='#FF8A80';
+      X.beginPath(); X.arc(bx,by,4,0,6.2832); X.fill();
+    }
+  }
+  for(const b of beams){
+    const k=1-b.t/b.life;
+    X.strokeStyle=b.cyan? 'rgba(191,243,255,'+k+')' : 'rgba(255,224,138,'+k+')';
+    X.lineWidth=b.cyan?5:3;
+    X.beginPath(); X.moveTo(b.x1-camX,b.y1); X.lineTo(b.x2-camX,b.y2); X.stroke();
+  }
+}
+
+function drawParts(){
+  for(const p of parts){
+    const k=1-p.t/p.life;
+    X.globalAlpha=k; X.fillStyle=p.c;
+    X.fillRect(p.x-camX-p.r/2,p.y-p.r/2,p.r,p.r);
+  }
+  X.globalAlpha=1;
+  X.textAlign='center'; X.font='500 18px sans-serif';
+  for(const f of floats){
+    const k=1-f.t/f.life;
+    X.globalAlpha=k;
+    X.strokeStyle='#0B0D10'; X.lineWidth=3;
+    X.strokeText(f.v,f.x-camX,f.y-k*34);
+    X.fillStyle='#FFE08A'; X.fillText(f.v,f.x-camX,f.y-k*34);
+  }
+  X.globalAlpha=1;
+}
+
+// ============================================================
+//  HUD
+// ============================================================
+function drawHud(){
+  // 顶部条
+  X.fillStyle=COL.ui; X.fillRect(0,0,CW,64);
+  // 血
+  X.fillStyle='#2A313A'; X.fillRect(20,20,240,18);
+  const hf=clamp(P.hp/P.hpMax,0,1);
+  X.fillStyle=hf>0.35?COL.hp:COL.hpLow; X.fillRect(20,20,240*hf,18);
+  X.strokeStyle='#0B0D10'; X.lineWidth=2; X.strokeRect(20,20,240,18);
+  X.fillStyle=COL.line; X.font='500 13px sans-serif'; X.textAlign='left';
+  X.fillText(Math.ceil(P.hp)+' / '+P.hpMax, 26, 34);
+
+  // 章节与任务
+  X.textAlign='center'; X.fillStyle=COL.mute; X.font='400 13px sans-serif';
+  X.fillText('第 '+L.ch+' 章 · '+L.name+'  —  '+L.subtitle, CW/2, 24);
+  X.fillStyle=goalDone?COL.hp:COL.gold; X.font='500 15px sans-serif';
+  let gt = L.goal.text;
+  if(L.goal.type==='reach') gt += '（'+Math.floor(P.x)+' / '+L.goal.x+' m）';
+  if(L.goal.type==='collect') gt += '（'+collected+' / '+L.goal.n+'）';
+  X.fillText(gt, CW/2, 46);
+
+  // 击杀
+  X.textAlign='right'; X.fillStyle=COL.mute; X.font='500 13px sans-serif';
+  X.fillText('击杀 '+killed, CW-20, 34);
+
+  // 武器栏
+  const bw=96, bx0=CW-20-6*bw;
+  for(let i=0;i<6;i++){
+    const bx=bx0+i*bw, by=CH-70;
+    const own=P.owned[i], act=i===P.weapon;
+    X.fillStyle=act?'rgba(240,185,60,0.22)':(own?'rgba(20,25,31,0.85)':'rgba(16,20,25,0.5)');
+    X.fillRect(bx,by,bw-8,54);
+    X.strokeStyle=act?COL.gold:(own?'#3A4450':'#262C34'); X.lineWidth=act?2.5:1.5;
+    X.strokeRect(bx,by,bw-8,54);
+    X.textAlign='center';
+    X.fillStyle=own?(act?COL.gold:COL.line):'#3F4750';
+    X.font='500 15px sans-serif';
+    X.fillText((i+1)+' '+WEAPONS[i].short, bx+(bw-8)/2, by+22);
+    if(own){
+      X.font='500 13px sans-serif';
+      const a=P.ammo[i], m=WEAPONS[i].mag;
+      X.fillStyle = a===0?COL.danger:(a<m*0.34?COL.gold:COL.mute);
+      X.fillText(a+' / '+m, bx+(bw-8)/2, by+42);
+    } else {
+      X.fillStyle='#3F4750'; X.font='400 12px sans-serif';
+      X.fillText('未解锁', bx+(bw-8)/2, by+42);
+    }
+  }
+  // 换弹进度
+  if(P.reloading>0){
+    const w=W();
+    X.fillStyle='rgba(12,15,19,0.8)'; X.fillRect(bx0,CH-88,6*bw-8,12);
+    X.fillStyle=COL.cyan;
+    X.fillRect(bx0,CH-88,(6*bw-8)*(1-P.reloading/w.reload),12);
+    X.fillStyle=COL.line; X.font='500 12px sans-serif'; X.textAlign='center';
+    X.fillText('换弹中…', CW-20-3*bw, CH-96);
+  }
+  // 手雷 / 闪避
+  X.textAlign='left'; X.fillStyle=COL.mute; X.font='500 13px sans-serif';
+  X.fillText('手雷 [G] × '+P.grenades, 20, CH-44);
+  X.fillStyle = P.dashCd>0?'#3A4450':COL.cyan;
+  X.fillText(P.dashCd>0? '闪避冷却 '+P.dashCd.toFixed(1)+'s' : '闪避 [Shift] 就绪', 20, CH-22);
+  // 提示
+  if(hintT>0){
+    X.textAlign='center'; X.fillStyle=COL.gold; X.font='500 20px sans-serif';
+    X.fillText(hint, CW/2, 120);
+  }
+  // 准星
+  drawCrosshair();
+}
+function drawCrosshair(){
+  const w=W();
+  const spread = 8 + w.spread*1.6 + (P.fireCd>0? 8:0);
+  X.strokeStyle='rgba(255,255,255,0.9)'; X.lineWidth=2;
+  X.beginPath();
+  X.moveTo(mouse.x-spread,mouse.y); X.lineTo(mouse.x-spread*0.45,mouse.y);
+  X.moveTo(mouse.x+spread*0.45,mouse.y); X.lineTo(mouse.x+spread,mouse.y);
+  X.moveTo(mouse.x,mouse.y-spread); X.lineTo(mouse.x,mouse.y-spread*0.45);
+  X.moveTo(mouse.x,mouse.y+spread*0.45); X.lineTo(mouse.x,mouse.y+spread);
+  X.stroke();
+  X.fillStyle='rgba(255,255,255,0.9)'; X.fillRect(mouse.x-1,mouse.y-1,2,2);
+}
+
+// ============================================================
+//  界面
+// ============================================================
+function drawTitle(){
+  X.fillStyle='#0B0D10'; X.fillRect(0,0,CW,CH);
+  // 背景剪影
+  for(let i=0;i<10;i++){
+    const bx=(i*137+((T*8)%137))%CW;
+    X.fillStyle='#141A21'; X.fillRect(bx,GROUND-260-((i*53)%7)*40,110,300);
+  }
+  // 标题火柴人
+  stick(CW/2-140, GROUND, 1, T*3, 2.4, COL.ink, 3.6);
+  stickArmed(CW/2+150, GROUND, -1, T*3+1, 2.4, COL.enemy, Math.PI, 26, 3.6);
+  X.textAlign='center';
+  X.fillStyle=COL.line; X.font='500 62px sans-serif';
+  X.fillText('火柴人枪枪大战', CW/2, 200);
+  X.fillStyle=COL.gold; X.font='500 24px sans-serif';
+  X.fillText('特 工 07 · 深 瞳 行 动', CW/2, 246);
+  X.fillStyle=COL.mute; X.font='400 15px sans-serif';
+  X.fillText('5 章剧情 · 6 把枪 · 3 场 BOSS', CW/2, 280);
+
+  const lines=[
+    'A / D 移动      W 或 空格 跳跃（可二段）',
+    '鼠标瞄准 · 左键射击（按住连发）',
+    '1-6 / 滚轮 / Q E 换枪      R 换弹',
+    'Shift 翻滚闪避（0.3 秒无敌）      G 手雷',
+    'P 暂停      M 静音',
+    '',
+    '剧情：你是特工 07。去拿一份名单——',
+    '然后你会发现，名单上写着你自己的名字。'
+  ];
+  X.font='400 17px sans-serif';
+  let y=380;
+  for(const l of lines){
+    X.fillStyle = l==='' ? COL.mute : (l.startsWith('剧情')?COL.gold:COL.line);
+    X.fillText(l, CW/2, y); y+=32;
+  }
+  X.fillStyle = (Math.floor(T*2)%2===0)?COL.gold:'rgba(240,185,60,0.35)';
+  X.font='500 26px sans-serif';
+  X.fillText('按 Enter 开始任务', CW/2, 660);
+}
+
+function drawStory(){
+  X.fillStyle='#0B0D10'; X.fillRect(0,0,CW,CH);
+  // 场景剪影：两个火柴人对谈
+  const t=storyLines[storyIdx];
+  X.globalAlpha=0.28;
+  stick(CW/2-260,GROUND,1,T*2,2.6, t&&t.who==='07'?COL.cyan:COL.ink, 3.6);
+  if(storyLines.length>1) stick(CW/2+260,GROUND,-1,T*2+1.4,2.6,COL.mute,3.6);
+  X.globalAlpha=1;
+  // 顶部字幕条
+  X.fillStyle=COL.ui; X.fillRect(0,CH-260,CW,260);
+  X.fillStyle='rgba(240,185,60,0.9)'; X.fillRect(0,CH-260,CW,3);
+
+  X.textAlign='left';
+  X.fillStyle=COL.mute; X.font='400 14px sans-serif';
+  X.fillText(storyMode==='brief'? '任务简报' : '任务回执', 120, CH-226);
+  X.fillStyle=COL.gold; X.font='500 26px sans-serif';
+  X.fillText('第 '+L.ch+' 章 · '+L.name, 120, CH-192);
+
+  const who = t? t.who : '';
+  X.fillStyle = who==='07'?COL.cyan : (who==='K'?'#C9A0FF':COL.line);
+  X.font='500 22px sans-serif';
+  X.fillText(who, 120, CH-150);
+  X.fillStyle=COL.line; X.font='400 22px sans-serif';
+  wrapText(t?t.t:'', 120, CH-112, CW-240, 34);
+  X.textAlign='right'; X.fillStyle=COL.mute; X.font='400 14px sans-serif';
+  X.fillText((storyIdx+1)+' / '+storyLines.length+'   空格或回车继续', CW-120, CH-24);
+}
+function wrapText(s,x,y,maxW,lh){
+  X.textAlign='left';
+  let line='', yy=y;
+  for(const ch of s){
+    if(X.measureText(line+ch).width>maxW){ X.fillText(line,x,yy); line=ch; yy+=lh; }
+    else line+=ch;
+  }
+  X.fillText(line,x,yy);
+}
+
+function drawEnd(win){
+  X.fillStyle='rgba(11,13,16,0.92)'; X.fillRect(0,0,CW,CH);
+  X.textAlign='center';
+  stick(CW/2,GROUND,1,T*2,2.6, win?COL.cyan:COL.enemy,3.6);
+  X.fillStyle=win?COL.gold:COL.danger; X.font='500 52px sans-serif';
+  X.fillText(win?'任务完成':'任务失败', CW/2, 220);
+  X.fillStyle=COL.mute; X.font='400 18px sans-serif';
+  X.fillText(win? '你把名单交了上去，也把自己从名单上划掉了。'
+                 : '这一次的记录被抹掉了。没有人知道 07 来过。', CW/2, 272);
+  if(!win){
+    X.fillStyle=COL.line; X.font='500 22px sans-serif';
+    X.fillText('按 Enter 重试本章 · 按 R 回到标题', CW/2, 360);
+  } else {
+    X.fillStyle=COL.mute; X.font='400 16px sans-serif';
+    let y=330;
+    for(const l of ['结局：你没有按下深瞳的开关。','——有些任务，完成的方式是拒绝执行。']){
+      X.fillText(l, CW/2, y); y+=30;
+    }
+    X.fillStyle=COL.line; X.font='500 22px sans-serif';
+    X.fillText('按 Enter 回到标题', CW/2, 430);
+  }
+}
+
+function drawPause(){
+  X.fillStyle='rgba(11,13,16,0.72)'; X.fillRect(0,0,CW,CH);
+  X.textAlign='center'; X.fillStyle=COL.gold; X.font='500 44px sans-serif';
+  X.fillText('暂停', CW/2, CH/2-10);
+  X.fillStyle=COL.line; X.font='400 16px sans-serif';
+  X.fillText('按 P 继续', CW/2, CH/2+30);
+}
+
+// ============================================================
+//  主循环
+// ============================================================
+let last=performance.now()/1000;
+function loop(now){
+  const nT=now/1000;
+  // dt 必须夹在 [0,0.05]：时钟回跳/首帧差值为负时会让整套计时失效
+  let raw=Math.max(0,Math.min(0.05,nT-last)); last=nT;
+  DT=raw; T+=raw;
+
+  if(once('m')) muted=!muted;
+  if(once('p') && (screen==='play')) paused=!paused;
+
+  if(screen==='title'){
+    if(once('Enter')) { startStory(0,'brief'); }
+  }
+  else if(screen==='story'){
+    if(once(' ')||once('Enter')||mouse.downOnce){
+      storyIdx++;
+      if(storyIdx>=storyLines.length){
+        if(storyMode==='brief'){ loadLevel(pendingNext<0?LIdx:pendingNext); pendingNext=-1; }
+        else { loadLevel(pendingNext); pendingNext=-1; }
+      }
+    }
+  }
+  else if(screen==='play'){
+    if(!paused){
+      updatePlayer(DT);
+      updateEnemies(DT);
+      updateBullets(DT);
+      updateParts(DT);
+      if(muzzle>0) muzzle-=DT;
+      if(shake>0) shake=Math.max(0,shake-DT*40);
+      if(hintT>0) hintT-=DT;
+      // 移动平台
+      for(const m of drones){
+        m.x += m.vx*DT;
+        if(m.x<m.min){ m.x=m.min; m.vx=Math.abs(m.vx); }
+        if(m.x>m.max){ m.x=m.max; m.vx=-Math.abs(m.vx); }
+      }
+      // 拾取
+      for(const p of pickups){
+        // 半径必须大于「地面到拾取点的高度差」，否则目标物看着近却永远拿不到
+        if(!p.taken && d2(P.x,P.y,p.x,p.y)<80*80){ p.taken=true; collected++; sfx('pick');
+          hint='设计图 +1（'+collected+'/'+L.goal.n+'）'; hintT=2.2; }
+      }
+      // BOSS 触发
+      if(L.boss && !bossRef && P.x>=L.bossX-520) spawnBoss(L.boss, L.bossX);
+      checkGoal();
+      // 相机
+      const want = clamp(P.x-CW*0.42, 0, Math.max(0,L.width-CW));
+      camX += (want-camX)*Math.min(1,DT*7);
+      if(goalDone){
+        // 达成目标后，稍作停顿再进入结算
+        if(!P._doneT) P._doneT=T;
+        if(T-P._doneT>1.2){ P._doneT=0; finishLevel(); }
+      }
+    }
+  }
+  else if(screen==='over'){
+    if(once('Enter')){ P._doneT=0; loadLevel(LIdx); }
+    if(once('r')){ screen='title'; }
+  }
+  else if(screen==='win'){
+    if(once('Enter')){ screen='title'; }
+  }
+
+  // ---- 绘制 ----
+  X.setTransform(1,0,0,1,0,0);
+  X.clearRect(0,0,CW,CH);
+  if(screen==='title'){ drawTitle(); }
+  else {
+    X.save();
+    X.translate(0, shake?rr(-shake,shake)*0.4:0);
+    drawWorld();
+    drawEnemies();
+    drawBullets();
+    drawPlayer();
+    drawParts();
+    X.restore();
+    // 敌人伤害屏闪
+    if(P.hurtFlash>0){ X.fillStyle='rgba(226,75,74,'+(P.hurtFlash*0.5)+')'; X.fillRect(0,0,CW,CH); }
+    drawHud();
+    if(screen==='story') drawStory();
+    if(screen==='over') drawEnd(false);
+    if(screen==='win') drawEnd(true);
+    if(paused && screen==='play') drawPause();
+  }
+  keysOnce={}; mouse.downOnce=false;
+  requestAnimationFrame(loop);
+}
+
+// 启动
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

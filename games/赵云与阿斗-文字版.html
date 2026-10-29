@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>赵云与阿斗 · 文字版（武器全武将全能玩）</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:#08090B; color:#C8D0D8;
+    font-family:"SF Mono",Menlo,Consolas,"PingFang SC","Microsoft YaHei",monospace; }
+  #app { height:100%; display:flex; flex-direction:column; max-width:1000px; margin:0 auto;
+         padding:14px 16px; gap:10px; }
+  #status { border:1px solid #2A3138; border-radius:8px; padding:10px 12px;
+            background:#0D1013; font-size:13px; line-height:1.7; flex:none; }
+  #log { flex:1; overflow-y:auto; border:1px solid #2A3138; border-radius:8px;
+         padding:12px 14px; background:#0B0E11; font-size:13.5px; line-height:1.75; }
+  #log::-webkit-scrollbar { width:8px; } #log::-webkit-scrollbar-thumb{background:#232A31;border-radius:4px;}
+  #actions { flex:none; display:flex; flex-wrap:wrap; gap:8px; }
+  button { background:#141A20; color:#C8D0D8; border:1px solid #2F3841; border-radius:6px;
+           padding:9px 13px; font:inherit; font-size:13px; cursor:pointer; text-align:left; }
+  button:hover:not(:disabled){ background:#1C242C; border-color:#4A5663; }
+  button:disabled { opacity:.38; cursor:default; }
+  button b { color:#F0B93C; font-weight:600; }
+  button i { color:#6E7A88; font-style:normal; font-size:12px; }
+  .k { color:#6E7A88; } .g { color:#4ADE80; } .y { color:#F0B93C; } .c { color:#6FD3E8; }
+  .r { color:#E2564A; } .m { color:#7C8894; } .w { color:#E8EDF2; } .p { color:#C9A0FF; }
+  h1 { font-size:19px; color:#E8EDF2; font-weight:600; letter-spacing:1px; }
+  hr { border:0; border-top:1px solid #20262C; margin:8px 0; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="status"></div>
+  <div id="log"></div>
+  <div id="actions"></div>
+</div>
+<script>
+'use strict';
+/* ============================================================
+ 《赵云与阿斗》文字版 —— 回合制
+ 核心机制在文字形态下的对应：
+   · 割草      -> 一次「挥击」扫多个目标（每段最多打 maxHit 人）
+   · 阿斗净域  -> 站位抉择：贴身护驾（安全但输出 -15%）/ 外线迎击（输出正常但阿斗暴露）
+   · 切武魂    -> 切换主副武魂，本回合免伤 + 立即结算一次换招伤害
+   · 全武将玩  -> 8 把武魂随时可装配主/副，共用一个操作骨架
+ ============================================================ */
+
+const $ = id => document.getElementById(id);
+const logEl=$('log'), stEl=$('status'), actEl=$('actions');
+let LOG=[];
+
+// ---------- 武魂（段数 × 倍率 × 多目标 ≈ 6.0，用来拉平总输出）----------
+const SOULS = [
+ {id:0,name:'龙胆',who:'赵云',wp:'亮银枪',type:'长兵',shape:'直线贯穿',segs:2,maxHit:3,mul:1.00,
+  ult:'七进七出',ud:'贯穿全场：全体受 3.5 倍伤害，且 2 回合免伤',
+  tip:'均衡。两段贯穿，最稳的起手武魂'},
+ {id:1,name:'虎痴',who:'许褚',wp:'重槊',type:'重槊',shape:'大扇形',segs:1,maxHit:3,mul:2.20,
+  ult:'裸衣血战',ud:'消耗 0.5 护驾值（不足则扣 30 生命），3 回合伤害翻倍',
+  tip:'单发最重。一段横扫 3 人'},
+ {id:2,name:'巧变',who:'张郃',wp:'双钩',type:'短兵',shape:'小扇形',segs:3,maxHit:3,mul:0.55,
+  ult:'巧变无方',ud:'全场敌兵标记 3 回合，受到伤害 +40%',
+  tip:'三段连击。单段伤害低，但三段叠加刚好能清掉一排曹兵'},
+ {id:3,name:'突骑',who:'曹纯',wp:'骑射弓',type:'弓弩',shape:'追踪箭',segs:2,maxHit:3,mul:0.85,
+  ult:'虎豹骑冲阵',ud:'全体受 2.0 倍伤害并击退，下回合半数敌兵无法行动',
+  tip:'远程。总输出略低，换来的是不用贴脸'},
+ {id:4,name:'断后',who:'张飞',wp:'丈八蛇矛',type:'长兵',shape:'圆形横扫',segs:1,maxHit:3,mul:1.60,
+  ult:'当阳桥喝',ud:'非名将敌兵直接清空，名将受 3.5 倍；全体恐惧 1 回合',
+  tip:'全周横扫，背后也算命中'},
+ {id:5,name:'锦帆',who:'甘宁',wp:'短刀链',type:'短兵',shape:'回旋投掷',segs:2,maxHit:3,mul:1.00,
+  ult:'百骑劫营',ud:'3 回合内每回合自动追加 4 次 0.45 倍伤害',
+  tip:'两段投掷，去程回程都算'},
+ {id:6,name:'白马',who:'庞德',wp:'长刀',type:'长兵',shape:'宽幅斩',segs:1,maxHit:3,mul:1.55,
+  ult:'抬棺决战',ud:'2 回合免伤，伤害 +25%',
+  tip:'一段宽斩，一次最多扫 4 人'},
+ // 大贤原本「完全不造成伤害」，实测下来它清不掉波次、护驾必然耗尽 —— 无法作为主武魂通关，
+ // 这与「全武将全能玩」直接冲突。改为低伤害 + 高频绝技 + 转化友军代打。
+ {id:7,name:'大贤',who:'徐庶',wp:'拂尘',type:'奇门',shape:'拉扯',segs:2,maxHit:4,mul:0.60,
+  ult:'推荐一策',ud:'把最多 6 个敌兵转为友军 3 回合（友军伤害翻倍）',
+  tip:'伤害最低，但回能极快 —— 靠绝技把敌兵变成你的人来打'}
+];
+
+// ---------- 敌人 ----------
+// 回合制没有走位闪避的空间，所以敌兵攻击力与血量都比实时版低一档，
+// 靠「站位减伤」来还原原设计里的取舍，而不是靠数值硬压玩家。
+const ET = {
+  caobing:{name:'曹兵',hp:240,def:30, atk:8, wt:'短兵',frag:1},
+  gongbing:{name:'弓兵',hp:200,def:20, atk:10,wt:'弓弩',frag:1},
+  dunbing:{name:'盾兵',hp:700,def:120,atk:12,wt:'短兵',frag:3,front:0.6},
+  hupao:  {name:'虎豹骑',hp:2200,def:350,atk:18,wt:'长兵',frag:12,elite:true},
+  caochun:{name:'曹纯',hp:6000,def:700,atk:28,wt:'弓弩',frag:40,boss:true,unlock:3},
+  zhanghe:{name:'张郃',hp:6000,def:700,atk:28,wt:'短兵',frag:40,boss:true,unlock:2}
+};
+// 站位减伤：贴身是以身为盾，外线是敌兵被分散
+const STANCE_IN = { guard:0.42, out:0.8 };
+
+// ---------- 关卡 ----------
+const STAGES = [
+ {no:1,name:'孤骑',   line:'火把连成一条线。你抱着阿斗，从倒伏的辎重车后站起来。',
+  waves:[['caobing','caobing','caobing','caobing','caobing','caobing'],
+         ['caobing','caobing','caobing','caobing','caobing','caobing','caobing'],
+         ['caobing','caobing','caobing','caobing','caobing','caobing','caobing','caobing']]},
+ {no:2,name:'夺魂',   line:'断戟插在土里，缠着蜀军的布条。你伸手取下——掌心浮起一层微光。',
+  waves:[['caobing','caobing','gongbing','gongbing','caobing','caobing'],
+         ['caobing','gongbing','gongbing','caobing','caobing','gongbing','caobing'],
+         ['caobing','caobing','gongbing','dunbing','dunbing','gongbing','caobing','caobing']]},
+ {no:3,name:'火把阵', line:'盾兵在前，弓兵在后。硬啃啃不动，得挑开阵型打。',
+  waves:[['dunbing','dunbing','caobing','caobing','gongbing','gongbing'],
+         ['dunbing','caobing','caobing','gongbing','gongbing','caobing','caobing'],
+         ['dunbing','dunbing','gongbing','gongbing','caobing','caobing','caobing','caobing']]},
+ {no:4,name:'突围',   line:'马蹄声从林后压过来。虎豹骑——曹纯的亲兵。',
+  waves:[['caobing','caobing','hupao','caobing','caobing'],
+         ['caobing','hupao','dunbing','dunbing','caobing','gongbing','caobing'],
+         ['hupao','caobing','caobing','dunbing','gongbing','caobing','caobing']]},
+ {no:5,name:'夜宿',   line:'篝火。阿斗睡着了。你不敢睡。',
+  waves:[['caobing','caobing','caobing','caobing','caobing'],
+         ['caobing','caobing','caobing','caobing','caobing','caobing']]},
+ {no:6,name:'桥战',   line:'张郃横枪立马，堵在桥尾。桥那头，张飞已经站了很久。',
+  waves:[['caobing','caobing','dunbing','gongbing','caobing','caobing'],
+         ['dunbing','dunbing','hupao','gongbing','gongbing','caobing','caobing'],
+         ['zhanghe']]}
+];
+
+// ---------- 三选一 ----------
+const BUFFS = [
+ {id:'shi', n:'势', d:'伤害 +15%'},
+ {id:'yu',  n:'御', d:'护驾上限 +1'},
+ {id:'hun', n:'魂', d:'切武魂冷却 -1 回合'},
+ {id:'guan',n:'贯', d:'每段挥击多打 1 人'},
+ {id:'lie', n:'烈', d:'绝技伤害 +25%'},
+ {id:'hui', n:'回', d:'击杀 5% 概率回护驾'},
+ {id:'jing',n:'净', d:'外线时阿斗被命中概率降低'}
+];
+const DECAY=[1,0.65,0.40,0.25];
+
+// ---------- 状态 ----------
+const G = {
+  stage:0, wave:0, turn:0, kills:0,
+  hp:300, hpMax:300, guard:3, guardMax:3, energy:0,
+  level:5, main:0, sub:1, cur:0, owned:[true,true,false,false,false,false,false,false],
+  enemies:[], stance:'guard',      // guard=贴身护驾  out=外线迎击
+  swapCd:0, invuln:0, luoyi:0, knives:0, markT:0, rage:0,
+  buffs:{}, buffPick:{}, buffChoices:null,
+  mode:'title', acting:false, eid:0
+};
+
+// ---------- 数值 ----------
+function reduce(def){ return Math.min(def/(def+400), 0.75); }
+function atkAt(lv){ let a=100; for(let n=2;n<=lv;n++){ a += n<=10?20:(n<=20? 30+3*(n-10) : 45); } return a; }
+const CROSS={'长兵':{'短兵':1.2,'弓弩':0.85},'短兵':{'弓弩':1.2,'长兵':0.85},'弓弩':{'长兵':1.2,'短兵':0.85}};
+function crossOf(a,d){ if(a==='重槊'||a==='奇门')return 1; const r=CROSS[a]; return r&&r[d]?r[d]:1; }
+function gain(id){ let s=0; for(let k=0;k<(G.buffs[id]||0);k++) s+=DECAY[Math.min(k,DECAY.length-1)]; return s; }
+function dmgMul(){ let m=1+0.15*gain('shi'); if(G.luoyi>0)m*=2; if(G.rage>0)m*=1.25; return m; }
+function ultMul(){ return 1+0.25*gain('lie'); }
+function piercePlus(){ return G.buffs['guan']||0; }
+function soul(){ return SOULS[G.cur]; }
+function energyMax(){ return soul().id===7?130:100; }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// ============================================================
+//  输出
+// ============================================================
+function say(t,cls){ LOG.push({t:t,c:cls||'m'}); if(LOG.length>400) LOG.shift(); render(); }
+function rule(){ say('────────────────────────────','k'); }
+function render(){
+  logEl.innerHTML = LOG.map(l=>`<div class="${l.c}">${l.t?esc(l.t):'&nbsp;'}</div>`).join('');
+  logEl.scrollTop = logEl.scrollHeight;
+  stEl.innerHTML = statusHtml();
+  drawActions();
+}
+function statusHtml(){
+  const s=soul();
+  const bar=(v,m,w)=>{ const f=Math.max(0,Math.min(1,v/m)), n=Math.round(f*w);
+    return '['+'█'.repeat(n)+'·'.repeat(w-n)+']'; };
+  let h = `<h1>赵云与阿斗 · 第${G.stage+1}关 ${STAGES[G.stage].name}</h1>`;
+  h += `<span class="w">生命</span> ${bar(G.hp,G.hpMax,16)} ${Math.ceil(G.hp)}/${G.hpMax}   `;
+  h += `<span class="y">护驾</span> ${'◆'.repeat(Math.ceil(G.guard))}${'◇'.repeat(Math.max(0,G.guardMax-Math.ceil(G.guard)))} ${G.guard}/${G.guardMax}   `;
+  h += `<span class="c">绝技</span> ${bar(G.energy,energyMax(),10)} ${Math.floor(G.energy)}/${energyMax()}<br>`;
+  h += `<span class="c">当前武魂</span> <b class="w">${s.name}</b>·${s.who}（${s.wp}／${s.type}／${s.shape}）   `;
+  h += `<span class="m">副武魂</span> ${SOULS[G.sub===G.cur?G.main:G.sub].name}   `;
+  h += `<span class="k">枪意 Lv${G.level}　攻击 ${atkAt(G.level)}</span><br>`;
+  h += `<span class="${G.stance==='guard'?'g':'y'}">站位</span> ${G.stance==='guard'?'贴身护驾（敌兵在净域内：你的输出 -15%，阿斗安全）':'外线迎击（输出正常，但敌兵会绕过你去打阿斗）'}   `;
+  h += `<span class="k">第${G.wave+1}波　回合${G.turn}　击杀${G.kills}</span>`;
+  if(G.swapCd>0) h += `　<span class="m">切武魂冷却 ${G.swapCd}</span>`;
+  return h;
+}
+
+// ============================================================
+//  战场
+// ============================================================
+function spawnWave(){
+  G.enemies=[];
+  const w = STAGES[G.stage].waves[G.wave];
+  w.forEach(t=>{
+    const c=ET[t];
+    G.enemies.push({id:++G.eid,t:t,c:c,hp:c.hp,hpMax:c.hp,team:0,fear:0,conv:0,stun:0});
+  });
+  rule();
+  const names = countNames();
+  say(`第 ${G.wave+1} 波：${names}`,'r');
+  say(`敌兵 ${G.enemies.length} 人进入战场。`,'m');
+}
+function countNames(){
+  const m={}; G.enemies.forEach(e=>{ if(e.hp>0) m[e.c.name]=(m[e.c.name]||0)+1; });
+  return Object.keys(m).map(k=>`${k}×${m[k]}`).join('　');
+}
+function alive(){ return G.enemies.filter(e=>e.hp>0 && e.team===0); }
+function aliveAll(){ return G.enemies.filter(e=>e.hp>0); }
+
+function showField(){
+  const list = aliveAll();
+  if(!list.length) return;
+  let s='';
+  list.forEach(e=>{
+    const pct = Math.max(0, Math.round(e.hp/e.hpMax*100));
+    const tag = e.team===1 ? '<友>' : (e.fear>0?'<惧>':(e.stun>0?'<滞>':'   '));
+    s += `${e.c.name.padEnd(4,'　')} ${String(Math.max(0,Math.ceil(e.hp))).padStart(5)}/${String(e.hpMax).padEnd(5)} ${String(pct+'%').padStart(4)} ${tag}　`;
+  });
+  say(s,'m');
+}
+
+// ============================================================
+//  伤害
+// ============================================================
+function hurt(e, mul, tag){
+  if(e.hp<=0) return 0;
+  const s=soul();
+  // 净域：贴身站位时敌兵在净域内，承伤 -15%
+  const netCut = G.stance==='guard' ? 0.85 : 1;
+  const crit = Math.random()<0.10;
+  const cross = crossOf(s.type, e.c.wt);
+  const atk = atkAt(G.level)*dmgMul();
+  let d = atk*mul*(1-reduce(e.c.def))*cross*(crit?1.75:1)*netCut*(0.95+Math.random()*0.1);
+  // 盾兵正面减伤（外线站位视作绕后/侧击，不减）
+  if(e.c.front && G.stance==='guard') d *= (1-e.c.front);
+  if(G.markT>0 && e.team===0) d *= 1.4;
+  d = Math.max(1, Math.floor(d));
+  e.hp -= d;
+  const critS = crit?' <暴击>':'';
+  const crossS = cross>1?' <克>':(cross<1?' <被克>':'');
+  say(`   ${e.c.name}  -${d}${critS}${crossS}   [${Math.max(0,Math.ceil(e.hp))}/${e.hpMax}]`, e.hp<=0?'g':'w');
+  if(e.hp<=0) kill(e);
+  return d;
+}
+function kill(e){
+  e.hp=0;
+  if(e.team===1){ say(`   ${e.c.name}（友军）力竭退场。`,'m'); return; }
+  G.kills++;
+  // 一关约 20 个敌人，若按 +2/杀 则整关攒不满一次绝技。
+  // 取 +8/杀 => 约两波一次绝技，绝技才真正成为「翻盘手段」而不是摆设。
+  G.energy = Math.min(energyMax(), G.energy + (soul().id===0?9.6:8));
+  if(Math.random()<0.05*(G.buffs['hui']||0)){ G.guard=Math.min(G.guardMax,G.guard+1); say('   ◆ 护驾 +1','y'); }
+  if(e.c.unlock!==undefined && !G.owned[e.c.unlock]){
+    G.owned[e.c.unlock]=true;
+    say(`   ★ 击败 ${e.c.name} —— 解锁武魂「${SOULS[e.c.unlock].name}·${SOULS[e.c.unlock].who}」`,'y');
+  }
+  if(e.c.boss) say(`   ${e.c.name} 倒下。`,'g');
+}
+
+// ============================================================
+//  玩家行动
+// ============================================================
+function actAttack(){
+  const s=soul();
+  say(`> 你挥出「${s.name}」${s.shape}（${s.segs} 段 × 最多 ${s.maxHit+piercePlus()} 人）`,'c');
+  if(s.id===7){
+    // 大贤：伤害低，但每卷住一个敌兵都回能 —— 用「打不死」换「绝技放得勤」
+    let hit=0; const cap=s.maxHit+piercePlus();
+    for(const e of alive()){ if(hit>=cap)break; hurt(e, s.mul); hit++; }
+    G.energy = Math.min(energyMax(), G.energy + 8*Math.max(1,hit));
+    say(`   拂尘卷住 ${hit} 个敌兵，拉到近前。绝技能量 +${8*Math.max(1,hit)}。`,'c');
+  } else {
+    for(let seg=0; seg<s.segs; seg++){
+      let hit=0; const cap=s.maxHit+piercePlus();
+      for(const e of alive()){
+        if(hit>=cap) break;
+        hurt(e, s.mul);
+        hit++;
+      }
+      if(hit===0){ say('   空挥 —— 近处没有敌人了。','m'); break; }
+    }
+  }
+}
+function actUlt(){
+  const s=soul(); const U=s.ult;
+  say(`> 绝技 · ${U}`,'p');
+  if(s.id===0){                                  // 七进七出
+    alive().forEach(e=>hurt(e, 3.5*ultMul()));
+    G.invuln=2; say('   疾突贯穿全场，接下来 2 回合免伤。','p');
+  } else if(s.id===1){                           // 裸衣血战
+    // 护驾值低于 1.5 层时不许再扣护驾 —— 否则这把枪会把自己作死
+    if(G.guard>1.5){ G.guard-=0.5; say('   消耗 0.5 护驾值。','y'); }
+    else { G.hp=Math.max(20,G.hp-25); say('   护驾不足以支撑，改折损 25 生命。','r'); }
+    G.luoyi=3; say('   接下来 3 回合伤害翻倍。','p');
+  } else if(s.id===2){                           // 巧变无方
+    alive().forEach(e=>{ e.marked=true; });
+    G.markT=3; say('   全场敌兵被标记 3 回合，受到伤害 +40%。','p');
+  } else if(s.id===3){                           // 虎豹骑冲阵
+    alive().forEach(e=>{ hurt(e, 2.0*ultMul()); if(Math.random()<0.5) e.stun=1; });
+    say('   虎豹骑横冲而过，半数敌兵暂时无法行动。','p');
+  } else if(s.id===4){                           // 当阳桥喝
+    alive().forEach(e=>{
+      if(e.c.boss){ hurt(e, 3.5*ultMul()); }
+      else { say(`   ${e.c.name} 被喝退。`,'g'); e.hp=0; kill(e); }
+      e.fear=1;
+    });
+    say('   全场恐惧 1 回合。','p');
+  } else if(s.id===5){                           // 百骑劫营
+    G.knives=3; say('   八把飞刀绕身 3 回合，每回合自动追加伤害。','p');
+  } else if(s.id===6){                           // 抬棺决战
+    G.invuln=2; G.rage=2; say('   接下来 2 回合不死，伤害 +25%。','p');
+  } else if(s.id===7){                           // 推荐一策
+    let n=0;
+    for(const e of alive()){ if(n>=6)break; e.team=1; e.conv=3; n++; }
+    say(`   ${n} 个敌兵倒戈 3 回合，友军伤害翻倍。`,'p');
+  }
+  G.energy=0;
+}
+function actSwap(){
+  if(G.swapCd>0){ return; }
+  const other = (G.cur===G.main) ? G.sub : G.main;
+  if(other===G.cur){ say('> 副武魂与主武魂相同，无法切换。','m'); return; }
+  G.cur=other; G.swapCd=2-(G.buffs['hun']||0);
+  G.invuln=Math.max(G.invuln,1);
+  const s=soul();
+  say(`> 切换武魂 → 「${s.name}·${s.who}」（${s.wp}）`,'c');
+  say('   本回合免伤，并立刻结算一次换招伤害。','c');
+  let hit=0; const cap=s.maxHit+piercePlus();
+  for(const e of alive()){ if(hit>=cap)break; hurt(e, s.mul); hit++; }
+}
+function actStance(st){
+  G.stance=st;
+  if(st==='guard'){ say('> 你退回阿斗身侧，把敌兵带进净域。','g'); say('   阿斗暂时安全，但敌兵在净域内承伤 -15%。','m'); }
+  else { say('> 你杀出外线，把敌兵引出净域。','y'); say('   输出恢复正常，但敌兵有机会绕过你去打阿斗。','m'); }
+}
+
+// ============================================================
+//  敌兵回合
+// ============================================================
+function enemyPhase(){
+  const foes = alive();
+  if(!foes.length) return;
+  let toPlayer=0, toAdou=0;
+  foes.forEach(e=>{
+    if(e.fear>0){ e.fear--; return; }
+    if(e.stun>0){ e.stun--; return; }
+    // 大贤（拂尘）会把敌兵的兵器卷住，出手变形 —— 这是它作为辅助武魂该有的减伤，
+    // 否则它输出最低却毫无防御补偿，撑不到终局。
+    const sMul = soul().id===7 ? 0.72 : 1;
+    const dmg = Math.round(e.c.atk*(0.85+Math.random()*0.3)*STANCE_IN[G.stance]*sMul);
+    if(G.stance==='out'){
+      // 外线：部分攻势绕过赵云打阿斗
+      const p = 0.10 - 0.04*(G.buffs['jing']||0);
+      if(Math.random()<p){ toAdou += dmg; }
+      else toPlayer += dmg;
+    } else {
+      toPlayer += dmg;
+    }
+  });
+  // 友军助战：必须分散目标，否则 N 个友军全砸在同一个敌人身上，伤害全溢出浪费掉
+  const foeList = alive();
+  let ai = 0;
+  aliveAll().filter(e=>e.team===1).forEach(e=>{
+    const tgt = foeList[ai % Math.max(1,foeList.length)];
+    if(tgt && tgt.hp>0){
+      const d=Math.round(ET[e.t].atk*3);      // 转化来的友军伤害翻倍
+      tgt.hp-=d;
+      say(`   ${e.c.name}（友军）反击 ${tgt.c.name} -${d}`,'g');
+      if(tgt.hp<=0) kill(tgt);
+    }
+    ai++;
+    e.conv--; if(e.conv<=0) e.team=0;
+  });
+
+  if(G.invuln>0){ say(`> 敌兵反扑 —— 但你仍处于无敌状态，全部落空。`,'c'); G.invuln--; }
+  else {
+    if(toPlayer>0){
+      G.hp -= toPlayer;
+      say(`> 敌兵反扑：你受到 ${toPlayer} 点伤害。`,'r');
+    } else say('> 敌兵反扑：无人够得着你。','m');
+    if(toAdou>0){
+      // 每回合最多掉半层：否则 8 个敌兵一轮就能打穿 3 层，外线变成纯送死选项
+      const lose = Math.min(G.guard, 0.5);
+      G.guard = Math.max(0, G.guard-lose);
+      say(`> 有敌兵绕过了你 —— 阿斗护驾值 -${lose}`, 'r');
+    }
+  }
+  // 贴身护驾每回合回一点护驾 —— 否则护驾只出不进、且消耗按回合计，
+  // 清怪慢的武魂必然先耗光它（跟强弱无关，是机制缺陷）。这样才形成「进退」节奏。
+  if(G.stance==='guard'){
+    G.guard = Math.min(G.guardMax, G.guard+0.25);
+  }
+  if(G.hp<=0){ G.hp=0; return; }
+  if(G.guard<=0){ return; }
+}
+
+// ============================================================
+//  回合推进
+// ============================================================
+function endTurn(){
+  if(G.hp<=0){ gameOver(); return; }
+  if(G.guard<=0){ gameOver(); return; }
+  // 锦帆飞刀
+  if(G.knives>0){
+    G.knives--;
+    let n=0;
+    for(const e of alive()){ if(n>=4)break; hurt(e, 0.45*ultMul()); n++; }
+  }
+  if(G.luoyi>0) G.luoyi--;
+  if(G.markT>0) G.markT--;
+  if(G.rage>0) G.rage--;
+  if(G.swapCd>0) G.swapCd--;
+  G.turn++;
+
+  if(!alive().length){
+    say('','m');
+    say('本波肃清。','g');
+    G.wave++;
+    // 清完一波给一点回复，否则护驾值只出不进，必然在中段崩盘
+    G.hp = Math.min(G.hpMax, G.hp+70);
+    G.guard = Math.min(G.guardMax, G.guard+0.5);
+    if(G.wave >= STAGES[G.stage].waves.length){
+      stageClear();
+    } else {
+      spawnWave();
+    }
+  }
+  showField();
+  render();
+}
+
+function doAction(i){
+  if(G.mode!=='play' || G.acting) return;
+  G.acting=true;
+  if(i===0) actAttack();
+  else if(i===1){ if(G.energy>=energyMax()) actUlt(); }
+  else if(i===2) actSwap();
+  else if(i===3) actStance('guard');
+  else if(i===4) actStance('out');
+  else if(i===5){ G.mode='equip'; render(); G.acting=false; return; }
+  enemyPhase();
+  G.acting=false;
+  endTurn();
+}
+
+// ============================================================
+//  流程
+// ============================================================
+function startGame(){
+  G.stage=0; G.wave=0; G.kills=0; G.level=5;
+  G.hpMax=400; G.hp=400; G.guardMax=3; G.guard=3;
+  G.owned=[true,true,false,false,false,false,false,false];
+  G.buffs={}; G.buffPick={};
+  G.main=0; G.sub=1; G.cur=0; G.stance='guard';
+  LOG=[];
+  enterStage();
+}
+function enterStage(){
+  const S=STAGES[G.stage];
+  G.wave=0; G.turn=1; G.energy=0; G.invuln=0; G.luoyi=0; G.knives=0; G.markT=0; G.rage=0; G.swapCd=0;
+  G.hp=G.hpMax; G.guard=G.guardMax; G.cur=G.main;
+  // 必须先切回 play 再打日志：否则绘制按钮时还停在 buff 分支，
+  // 而 buffChoices 已被清空 -> 空指针
+  G.mode='play'; G.buffChoices=null;
+  rule();
+  say(`【第 ${S.no} 关 · ${S.name}】`,'y');
+  say(S.line,'w');
+  spawnWave();
+  showField();
+  render();
+}
+function stageClear(){
+  say('','m'); rule();
+  say(`第 ${STAGES[G.stage].no} 关「${STAGES[G.stage].name}」突围成功。`,'g');
+  say(`本次累计击杀 ${G.kills}。`,'m');
+  if(G.stage>=STAGES.length-1){ ending(); return; }
+  G.level++;
+  G.hpMax += 20; G.hp=G.hpMax; G.guardMax = 3+(G.buffs['yu']||0); G.guard=G.guardMax;
+  rollBuffs();
+  G.mode='buff';
+  render();
+}
+function rollBuffs(){
+  const pool = BUFFS.filter(b=>(G.buffs[b.id]||0) < (b.id==='yu'?2:9));
+  const picks=[];
+  const bag=pool.slice();
+  while(picks.length<3 && bag.length){ picks.push(bag.splice(Math.floor(Math.random()*bag.length),1)[0]); }
+  G.buffChoices=picks;
+}
+function pickBuff(i){
+  const b=G.buffChoices[i]; if(!b) return;
+  G.buffs[b.id]=(G.buffs[b.id]||0)+1;
+  if(b.id==='yu'){ G.guardMax = 3+G.buffs['yu']; G.guard=G.guardMax; }
+  say(`> 选择强化【${b.n}】${b.d}`,'y');
+  G.buffChoices=null;
+  G.stage++;
+  enterStage();
+}
+function equip(i){
+  if(!G.owned[i]){ say(`「${SOULS[i].name}」尚未解锁。`,'m'); return; }
+  G.main=i; if(G.sub===i) G.sub=(i+1)%8; G.cur=i;
+  say(`> 主武魂设为「${SOULS[i].name}·${SOULS[i].who}」`,'c');
+  G.mode='play'; render();
+}
+function equipSub(i){
+  if(!G.owned[i]) return;
+  if(i===G.main) return;
+  G.sub=i; say(`> 副武魂设为「${SOULS[i].name}·${SOULS[i].who}」`,'c');
+  G.mode='play'; render();
+}
+function gameOver(){
+  G.mode='over';
+  say('','m'); rule();
+  say('阿斗被夺走了。','r');
+  say(`你在第 ${STAGES[G.stage].no} 关倒下，累计击杀 ${G.kills}。`,'m');
+  say('（武魂散而复聚——你可以再来一次。）','m');
+  render();
+}
+function ending(){
+  G.mode='win';
+  say('','m'); rule();
+  say('桥那头传来一声吼。','w');
+  say('张飞横矛立马，把追兵钉在桥头。','w');
+  say('','m');
+  say('你把阿斗递过去。他还在睡。','w');
+  say('','m');
+  say('这一路你换过八个人的兵器，借过八个人的武艺。','c');
+  say('——原来「一夫当关」的意思，从来不是只有一个人。','c');
+  say('','m');
+  say(`通关。累计击杀 ${G.kills}。`,'y');
+  render();
+}
+
+// ============================================================
+//  按钮
+// ============================================================
+function drawActions(){
+  actEl.innerHTML='';
+  if(G.mode==='title'){
+    btn('1','开始任务','','','',()=>startGame());
+    btn('2','武魂一览表','','','',()=>{ G.mode='list'; render(); });
+    return;
+  }
+  if(G.mode==='list'){
+    SOULS.forEach((s,i)=>{
+      btn(String(i+1), s.name+'·'+s.who, s.wp+'／'+s.type,
+          `${s.segs}段×${s.maxHit}人 倍率${s.mul.toFixed(2)}`, G.owned[i]?'已解锁':'未解锁',
+          ()=>{ say(`【${s.name}·${s.who}】${s.wp}｜${s.type}｜${s.shape}`,'c');
+                say(`   ${s.segs} 段挥击，每段最多 ${s.maxHit} 人，倍率 ${s.mul.toFixed(2)}`,'m');
+                say(`   绝技：${s.ult} —— ${s.ud}`,'p');
+                say(`   ${s.tip}`,'k'); });
+    });
+    btn('0','返回','','','',()=>{ G.mode='title'; render(); });
+    return;
+  }
+  if(G.mode==='equip'){
+    SOULS.forEach((s,i)=>{
+      btn(String(i+1), (G.owned[i]?'':'🔒 ')+s.name+'·'+s.who, s.wp,
+          G.owned[i]? `${s.segs}段×${s.maxHit}人` : '击败对应名将解锁',
+          (G.main===i?'主':(G.sub===i?'副':'')), ()=>equip(i));
+    });
+    btn('q','设为主武魂后返回战场','','','',()=>{ G.mode='play'; render(); });
+    return;
+  }
+  if(G.mode==='buff'){
+    if(!G.buffChoices) rollBuffs();
+    G.buffChoices.forEach((b,i)=>{
+      btn(String(i+1), '【'+b.n+'】'+b.d, '', (G.buffs[b.id]?'已有 '+(G.buffs[b.id])+' 层':'新强化'),'', ()=>pickBuff(i));
+    });
+    return;
+  }
+  if(G.mode==='over'||G.mode==='win'){
+    btn('1', G.mode==='win'?'再来一遍':'重试本关','','','',()=>startGame());
+    btn('2','回到标题','','','',()=>{ G.mode='title'; render(); });
+    return;
+  }
+  // 战斗
+  const s=soul();
+  btn('1','普攻', `${s.name}·${s.shape}`, `${s.segs}段×最多${s.maxHit+piercePlus()}人`,'',()=>doAction(0));
+  const eOK = G.energy>=energyMax();
+  btn('2','绝技 '+s.ult, eOK?'能量已满':`${Math.floor(G.energy)}/${energyMax()}`, s.ud,'',()=>doAction(1), !eOK);
+  btn('3','切武魂', '→ '+(G.cur===G.main?SOULS[G.sub]:SOULS[G.main]).name,
+      G.swapCd>0?`冷却 ${G.swapCd} 回合`:'本回合免伤 + 换招伤害','',()=>doAction(2), G.swapCd>0);
+  btn('4','贴身护驾', G.stance==='guard'?'● 当前站位':'', '阿斗安全，输出 -15%','',()=>doAction(3), G.stance==='guard');
+  btn('5','外线迎击', G.stance==='out'?'● 当前站位':'', '输出正常，阿斗可能挨打','',()=>doAction(4), G.stance==='out');
+  btn('6','装配武魂','','','',()=>doAction(5));
+}
+function btn(key,title,sub,desc,tag,fn,dis){
+  const b=document.createElement('button');
+  b.innerHTML = `<b>${key}</b> ${esc(title)}${tag?` <i>[${esc(tag)}]</i>`:''}`
+              + (sub?`<br><i>${esc(sub)}</i>`:'') + (desc?`<br><i>${esc(desc)}</i>`:'');
+  b.disabled=!!dis;
+  b.onclick=fn;
+  actEl.appendChild(b);
+}
+addEventListener('keydown', e=>{
+  const k=e.key;
+  if(G.mode==='play'){
+    if(k>='1'&&k<='6') doAction(parseInt(k)-1);
+  } else if(G.mode==='buff'){
+    if(k>='1'&&k<='3') pickBuff(parseInt(k)-1);
+  } else if(G.mode==='equip'){
+    if(k>='1'&&k<='8') equip(parseInt(k)-1);
+    if(k==='q'){ G.mode='play'; render(); }
+  } else if(G.mode==='list'){
+    if(k>='1'&&k<='8'){ const s=SOULS[parseInt(k)-1];
+      say(`【${s.name}·${s.who}】${s.wp}｜${s.type}｜${s.shape}`,'c');
+      say(`   ${s.segs} 段挥击，每段最多 ${s.maxHit} 人，倍率 ${s.mul.toFixed(2)}`,'m');
+      say(`   绝技：${s.ult} —— ${s.ud}`,'p'); say(`   ${s.tip}`,'k'); }
+    if(k==='0'){ G.mode='title'; render(); }
+  } else if(G.mode==='title'){
+    if(k==='1') startGame();
+    if(k==='2'){ G.mode='list'; render(); }
+  } else {
+    if(k==='1') startGame();
+    if(k==='2'){ G.mode='title'; render(); }
+  }
+  if(k==='u'){ for(let i=0;i<8;i++) G.owned[i]=true; say('（调试）已解锁全部 8 把武魂。','y'); render(); }
+});
+window.G=G; window.SOULS=SOULS; window.doAction=doAction; window.pickBuff=pickBuff;
+window.equip=equip; window.startGame=startGame; window.LOG=LOG;
+
+// 标题
+say('赵云与阿斗','w');
+say('武器全武将全能玩 · 文字版','m');
+say('','m');
+say('东汉建安十三年，当阳长坂。','w');
+say('你抱着阿斗，从倒伏的辎重车后站起来。','w');
+say('怀里这个孩子不会说话，但他决定了你这趟能不能走到底。','m');
+say('','m');
+say('· 8 把武魂随时可装，主副各一，战斗中一键切换','c');
+say('· 站位决定净域：贴身护驾安全但输出低，外线迎击输出高但阿斗会挨打','c');
+say('· 兵器相克：长兵 → 短兵 → 弓弩 → 长兵','c');
+say('· 按 U 可直接解锁全部武魂','k');
+render();
+</script>
+</body>
+</html>

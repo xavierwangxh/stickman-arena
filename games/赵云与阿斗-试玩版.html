@@ -1,0 +1,1671 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>赵云与阿斗 · 电脑试玩版</title>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { height:100%; background:#14110E; overflow:hidden;
+    font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif; }
+  #wrap { height:100%; display:flex; align-items:center; justify-content:center; }
+  canvas { height:100vh; max-height:100vh; display:block;
+    box-shadow:0 0 0 1px #2C2C2A, 0 20px 60px rgba(0,0,0,.6); image-rendering:auto; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="720" height="1280"></canvas></div>
+<script>
+'use strict';
+
+/* ============================================================
+   《赵云与阿斗》电脑试玩版 —— 按策划案 v0.1 实现的可玩原型
+   覆盖：武魂双持瞬切 / 切招 0.3s 无敌帧 / 阿斗净域 / 乘法减伤与兵器相克 /
+        局内三选一 / 波次推进与名将 BOSS / 8 把全武魂
+   未做：养成、存档、变现、idata（玩法验证用）
+   ============================================================ */
+
+const CV = document.getElementById('cv');
+const X  = CV.getContext('2d');
+const CW = 720, CH = 1280;
+
+// ---------- 色板（与《美术风格提案》第四节一致）----------
+const COL = {
+  line:'#16120F', ground:'#423D33', deco:'#55483A',
+  vermilion:'#C94B33', silver:'#D5DAE0', gold:'#F0B93C',
+  enemy:'#6E6A55', enemySub:'#4E5344', danger:'#8C2020', mute:'#8A8478'
+};
+
+// ---------- 数值常量（全部可在这里调，不散在工程里）----------
+const BAL = {
+  playerSpeed: 320,      // px/s，全武魂统一
+  hurtStun: 0.25,
+  invincible: 0.60,      // 受击无敌帧
+  switchInvincible: 0.30,// 切武魂无敌帧 —— 核心手感参数
+  switchCd: 1.50,
+  backHitMul: 1.30,      // 背后受击加成
+  guardMax: 3,           // 护驾值层数
+  guardHitCost: 0.5,
+  nearAdou: 60,          // 敌人在此半径内命中后才扣护驾
+  fieldR: 100,           // 净域半径
+  fieldSlow: 0.20,       // 净域内敌人减速
+  fieldDmgCut: 0.15,     // 净域内敌人承伤降低
+  recoverWindow: 3.0,    // 夺回窗口
+  recoverPress: 3,
+  reduceCap: 0.75,       // 减伤率上限
+  defK: 400,             // 减伤公式常数
+  critRate: 0.10, critMul: 1.75,
+  energyMax: 100, energyPerKill: 2,
+  adouFollow: 4.0,
+  pxPerM: 24,
+  maxEnemies: 220
+};
+
+// ---------- 兵器类型与相克三角 ----------
+// 长兵 → 短兵 → 弓弩 → 长兵；重槊 / 奇门 中立
+const CROSS = { '长兵':{'短兵':1.2,'弓弩':0.85}, '短兵':{'弓弩':1.2,'长兵':0.85},
+                '弓弩':{'长兵':1.2,'短兵':0.85} };
+function crossMul(atkType, defType){
+  if (atkType==='重槊' || atkType==='奇门') return 1;
+  const row = CROSS[atkType]; return (row && row[defType]) ? row[defType] : 1;
+}
+
+// ---------- 兵器文化数据 ----------
+// 注意：mul/rate 是策划案里的**单目标**数值。割草玩法里真正决定强弱的是
+// 「频率 × 倍率 × 每次横扫能打到几个」，所以每把武魂额外给了 maxHit（同时命中的目标上限），
+// 用 maxHit 把多目标总输出拉回同一水平线，而不是去改策划案里的 mul。
+const SOULS = [
+  {id:1,name:'龙胆',general:'赵云',weapon:'亮银枪',type:'长兵',shape:'line',
+   len:180,w:60,pierce:3,maxHit:3,knock:180,rate:1.6,mul:1.00,ult:'qijin',
+   ultName:'七进七出',tip:'贯穿直线的均衡打法，疾突时无敌'},
+  {id:2,name:'虎痴',general:'许褚',weapon:'重槊',type:'重槊',shape:'sector',
+   r:120,deg:140,maxHit:3,knock:90,rate:0.8,mul:2.20,ult:'luoyi',
+   ultName:'裸衣血战',tip:'大范围重击，绝技用护驾值换双倍'},
+  {id:3,name:'巧变',general:'张郃',weapon:'双钩',type:'短兵',shape:'sector',
+   r:80,deg:60,maxHit:4,knock:70,rate:3.0,mul:0.55,ult:'qiaobian',
+   ultName:'巧变无方',tip:'极高频，绝技给全场打印记'},
+  {id:4,name:'突骑',general:'曹纯',weapon:'骑射弓',type:'弓弩',shape:'throw',
+   range:400,pspeed:520,maxHit:3,knock:90,rate:2.0,mul:0.85,ult:'hupao',
+   ultName:'虎豹骑冲阵',tip:'远程自动追踪，箭矢贯穿 3 人'},
+  {id:5,name:'断后',general:'张飞',weapon:'丈八蛇矛',type:'长兵',shape:'circle',
+   r:110,maxHit:3,knock:150,rate:1.0,mul:1.60,ult:'heqiao',
+   ultName:'当阳桥喝',tip:'全周横扫（含背后），绝技清屏并恐惧'},
+  {id:6,name:'锦帆',general:'甘宁',weapon:'短刀链',type:'短兵',shape:'throw',
+   range:260,pspeed:420,maxHit:3,knock:90,rate:1.35,mul:1.00,back:0.5,ult:'baiqi',
+   ultName:'百骑劫营',tip:'回旋投掷去程穿透，回程有半伤'},
+  {id:7,name:'白马',general:'庞德',weapon:'长刀',type:'长兵',shape:'sector',
+   r:140,deg:100,maxHit:3,knock:160,rate:1.1,mul:1.40,ult:'taiguan',
+   ultName:'抬棺决战',tip:'宽幅斩击，绝技十秒不死'},
+  {id:8,name:'大贤',general:'徐庶',weapon:'拂尘',type:'奇门',shape:'grab',
+   r:200,rate:1.5,mul:0,ult:'tuijian',
+   ultName:'推荐一策',tip:'不造成伤害，靠拉扯回能，绝策把敌兵转为友军'}
+];
+
+// ---------- 敌人数据（策划案 7.5）----------
+// 攻击力偏低 —— 失败靠「护驾值」判定，血量只是一层缓冲，
+// 站着不动约 15 秒才会被打空，给玩家足够的犯错空间
+const ETYPE = {
+  caobing:{name:'曹兵',hp:300,def:30, speed:150,atk:12, cd:1.4,radius:40,wt:'短兵',
+           coin:3, frag:1, scale:1.0},
+  gongbing:{name:'弓兵',hp:250,def:20, speed:130,atk:16, cd:2.0,radius:400,wt:'弓弩',
+           coin:4, frag:1, scale:0.95, ranged:true},
+  dunbing:{name:'盾兵',hp:900,def:120,speed:100,atk:18, cd:1.6,radius:44,wt:'短兵',
+           coin:8, frag:3, scale:1.15, frontGuard:0.60},
+  hupao:  {name:'虎豹骑',hp:3500,def:350,speed:260,atk:34, cd:1.8,radius:56,wt:'长兵',
+           coin:30,frag:12,scale:1.5, elite:true, ranged:false},
+  zhanghe:{name:'张郃',hp:18000,def:700,speed:180,atk:60,cd:1.5,radius:110,wt:'短兵',
+           coin:120,frag:40,scale:2.4, elite:true, boss:true, unlock:3},
+  caochun:{name:'曹纯',hp:18000,def:700,speed:180,atk:60,cd:1.5,radius:110,wt:'弓弩',
+           coin:120,frag:40,scale:2.4, elite:true, boss:true, unlock:4},
+  xuchu:  {name:'许褚',hp:18000,def:700,speed:180,atk:60,cd:1.5,radius:110,wt:'重槊',
+           coin:120,frag:40,scale:2.4, elite:true, boss:true, unlock:2}
+};
+
+// ---------- 关卡（策划案第 8 章前 6 关，按 MVP 精简）----------
+const DEMO_LEVEL_BASE = 5;   // 试玩版起手等级
+const STAGES = [
+  {no:1,name:'初阵', dist:400, kills:120, maxAlive:45, pool:['caobing'],
+   boss:null, intro:'忽有一队曹兵自火把间转出。'},
+  {no:2,name:'夺魂', dist:400, kills:170, maxAlive:55, pool:['caobing','gongbing'],
+   boss:null, intro:'远处有人在看着这场突围。'},
+  {no:3,name:'火把阵', dist:500, kills:220, maxAlive:65, pool:['caobing','gongbing','dunbing'],
+   boss:null, intro:'盾兵在前，弓兵在后 —— 要挑开放式打。'},
+  {no:4,name:'突围', dist:500, kills:240, maxAlive:70, pool:['caobing','dunbing','hupao'],
+   boss:null, intro:'虎豹骑的马蹄声从林后压过来。'},
+  {no:5,name:'夜宿', dist:400, kills:150, maxAlive:40, pool:['caobing'],
+   boss:null, intro:'篝火边的片刻喘息 —— 低难度补给关。'},
+  {no:6,name:'桥战', dist:600, kills:260, maxAlive:70, pool:['caobing','dunbing','gongbing'],
+   boss:'zhanghe', intro:'张郃横枪立马，堵在桥尾。'}
+];
+
+// ---------- 三选一强化池（策划案 6.3）----------
+const BUFFS = [
+  {id:'shi', name:'势', desc:'伤害 +15%',   icon:'力'},
+  {id:'ji',  name:'疾', desc:'移速 +10%',   icon:'疾'},
+  {id:'yu',  name:'御', desc:'护驾上限 +1', icon:'御', max:2},
+  {id:'hun', name:'魂', desc:'切招冷却 -30%',icon:'魂', max:3},
+  {id:'guan',name:'贯', desc:'贯穿 +1 目标',icon:'贯', max:3},
+  {id:'lie', name:'烈', desc:'绝技伤害 +25%',icon:'烈'},
+  {id:'hui', name:'回', desc:'5% 击杀回复护驾',icon:'回', max:3},
+  {id:'jing',name:'净', desc:'净域半径 -30',  icon:'净', max:2}
+];
+const DECAY = [1, 0.65, 0.40, 0.25];
+
+// ============================================================
+//  状态
+// ============================================================
+let T = 0, DT = 0;                 // 全局时间 / 帧间隔
+let screen = 'title';              // title | select | play | buff | clear | over
+let keys = {}, keysOnce = {};
+
+const P = {
+  x:0, y:0, dir:-Math.PI/2, hp:220, hpMax:220, level:1,
+  guard:3, guardMax:3,
+  energy:0, atkTimer:0, ultTimer:0,
+  invulnUntil:0, swapReadyAt:0, stunUntil:0,
+  main:0, sub:1, cur:0,            // 武魂索引
+  dash:null, dashHit:null,
+  buffs:{},                        // id -> 层数
+  stone:{},                        // 三选一已选次数（用于衰减）
+  moveTrue:false
+};
+
+const AD = { x:0, y:0 };           // 阿斗
+let enemies = [], projs = [], texts = [], vfx = [], riders = [];
+let unlocked = [0,1];              // 已解锁武魂索引
+let stageIdx = 0, stage = null;
+let kills = 0, distM = 0, startY = 0, fragCount = 0, fragTotal = 0;
+let netBuffer = 0, netWave = 0, nextNetAt = 0;
+let recover = null, result = null;
+let activeWall = null;       // 当前挡路的围堵墙
+let guardIcdUntil = 0;       // 护驾值损失的内部 CD，防止被围时瞬间掉光
+let buffChoices = [], netFragBank = 0;
+let ultFx = { t:0, kind:'' };
+let timeScale = 1, shake = 0, paused = false, blocked = false;
+let selectStep = 0, selMain = 0, selSub = 1;
+let seededToggle = true;
+
+// 确定性随机（便于复现）
+let _seed = 20261007;
+function rnd(){ _seed = (_seed*1664525 + 1013904223) >>> 0; return _seed/4294967296; }
+function rr(a,b){ return a + rnd()*(b-a); }
+function ri(a,b){ return Math.floor(rr(a,b+1)); }
+
+// 临时运算对象（不每帧 new）
+const tmpA = {x:0,y:0};
+
+// ============================================================
+//  数值：伤害公式（策划案 7.1）
+// ============================================================
+function reduceOf(def){ return Math.min(def/(def+BAL.defK), BAL.reduceCap); }
+
+function calcDamage(atk, mul, def, atkType, defType, isCrit, rand){
+  const red  = reduceOf(def);
+  const cr   = isCrit ? BAL.critMul : 1;
+  let cross  = crossMul(atkType, defType);
+  let dmg    = atk*mul*(1-red)*cross*cr*rand;
+  return { dmg: Math.max(1, Math.floor(dmg)), cross };
+}
+
+// 攻击力成长曲线（策划案 7.2）
+function atkAt(lv){
+  let a = 100;
+  for (let n=2;n<=lv;n++){
+    if (n<=10) a += 20;
+    else if (n<=20) a += 30 + 3*(n-10);
+    else a += 45;
+  }
+  return a;
+}
+
+// ============================================================
+//  工具
+// ============================================================
+function d2(ax,ay,bx,by){ const dx=ax-bx, dy=ay-by; return dx*dx+dy*dy; }
+function dd(ax,ay,bx,by){ return Math.sqrt(d2(ax,ay,bx,by)); }
+function clamp(v,a,b){ return v<a?a:(v>b?b:v); }
+function angDiff(a,b){ let d=a-b; while(d>Math.PI)d-=Math.PI*2; while(d<-Math.PI)d+=Math.PI*2; return d; }
+
+function soul(i){ return SOULS[i]; }
+function curSoul(){ return SOULS[P.cur]; }
+function energyMax(){ return curSoul().id===8 ? 130 : 100; }
+
+// 强化加成
+function buffStack(id){ return P.buffs[id]||0; }
+function buffGain(id){
+  let s = 0, dec = 0;
+  for (let k=0;k<(P.buffs[id]||0);k++) s += DECAY[Math.min(k,DECAY.length-1)];
+  return s;
+}
+function dmgMulBonus(){ return 1 + 0.15*buffGain('shi'); }
+function speedBonus(){  return 1 + 0.10*buffGain('ji'); }
+function ultBonus(){    return 1 + 0.25*buffGain('lie'); }
+function swapCd(){      return BAL.switchCd * Math.pow(0.7, buffStack('hun')); }
+function pierceBonus(){ return buffStack('guan'); }
+// 净域实际半径（可被「净」强化缩小，玩家用来削弱承伤惩罚）
+function fieldR(){      return Math.max(30, BAL.fieldR - 30*buffStack('jing')); }
+
+// ============================================================
+//  输入
+// ============================================================
+addEventListener('keydown', e=>{
+  const k = e.key.length===1 ? e.key.toLowerCase() : e.key;
+  keys[k] = true; keysOnce[k] = true;
+  if ([' ','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Tab'].includes(e.key)) e.preventDefault();
+});
+addEventListener('keyup', e=>{
+  const k = e.key.length===1 ? e.key.toLowerCase() : e.key;
+  keys[k] = false;
+});
+function once(k){ if (keysOnce[k]){ keysOnce[k]=false; return true; } return false; }
+
+// ============================================================
+//  流程
+// ============================================================
+function resetStage(){
+  enemies=[]; projs=[]; texts=[]; vfx=[]; riders=[];
+  netFragBank = 0;
+  P.luoyiUntil = 0; P.knivesUntil = 0; P.taiguanUntil = 0; P.knives = [];
+  P.x = CW*0.5; P.y = 0; startY = 0;
+  P.hpMax = 300; P.hp = 300;
+  guardIcdUntil = 0;
+  P.guardMax = 3 + buffStack('yu'); P.guard = P.guardMax;
+  P.energy = 0; P.atkTimer = 0; P.invulnUntil = 0; P.swapReadyAt = 0;
+  P.dash = null; P.cur = P.main;
+  AD.x = P.x; AD.y = P.y + 40;
+  kills = 0; distM = 0; fragCount = 0; fragTotal = 0;
+  netBuffer = 0; netWave = 0; nextNetAt = 320;
+  activeWall = null;
+  recover = null; timeScale = 1;
+  P.buffs = {}; P.stone = {};
+  // 开局立刻给一小碗敌人，避免前 10 秒空场
+  for (let i=0;i<7;i++) spawnEnemy(stage.pool[ri(0,stage.pool.length-1)]);
+}
+function enterStage(i){
+  stageIdx = i; stage = STAGES[Math.min(i, STAGES.length-1)];
+  // 试玩版从第 5 级起手：策划案里 Lv1 需要 3 击杀死一个曹兵，
+  // 完整版有养成铺垫；为了让你一上手就能试出割草手感，这里直接给到第 5 级。
+  P.level  = DEMO_LEVEL_BASE + i;
+  paused = false;
+  resetStage();
+  screen = 'play';
+}
+function startGame(){
+  screen = 'select'; selectStep = 0;
+  selMain = P.main; selSub = P.sub;
+}
+
+// ============================================================
+//  敌人
+// ============================================================
+function spawnEnemy(typeKey, atX, atY, team){
+  const cap = stage ? Math.min(stage.maxAlive + 40, BAL.maxEnemies) : BAL.maxEnemies;
+  if (enemies.length >= cap) return null;
+  const c = ETYPE[typeKey];
+  // 刷新半径贴近可视边缘：太远会让敌人走 4-5 秒才到，割草密度起不来
+  const ang = rr(0, Math.PI*2), rad = rr(400, 600);
+  const x = atX!==undefined ? atX : P.x + Math.cos(ang)*rad;
+  const y = atY!==undefined ? atY : P.y + Math.sin(ang)*rad;
+  const e = {
+    x: x, y: y, tk: typeKey, cfg: c, team: team||0,
+    hp: c.hp, hpMax: c.hp, cd: rr(0, c.cd), flash:0, knock:0, kx:0, ky:0,
+    fearUntil:0, markedUntil:0, convertUntil:0, target:null, wob: rr(0,6.28),
+    face:1, anim:0, dead:false
+  };
+  if (e.team===1) e.convertUntil = T + 5;
+  enemies.push(e);
+  return e;
+}
+
+function maintainEnemies(dt){
+  const cap = Math.min(stage.maxAlive, BAL.maxEnemies);
+  if (enemies.length < cap){
+    const budget = 3 + stage.no*0.8;
+    if (rnd() < budget*dt){
+      const tk = stage.pool[ ri(0, stage.pool.length-1) ];
+      spawnEnemy(tk);
+    }
+  }
+}
+
+// 每推进一段距离，在前方刷一道横向「围堵墙」。
+// 墙未打穿前会挡住去路 —— 否则玩家可以直接绕过所有敌人跑完全程，
+// 这正是本作必须做的结构：胜利条件是「打穿」而不是「跑完」。
+function updateNetWalls(){
+  if (activeWall) return;
+  const progressed = startY - P.y;
+  if (progressed < nextNetAt) return;
+  nextNetAt = progressed + 900 + stage.no*80;
+  spawnWall();
+}
+function spawnWall(){
+  const rowK = stage.pool, n = Math.min(14 + stage.no*2, 26);
+  const baseY = P.y - 700;                  // 屏幕上方 = 前进方向
+  const members = [];
+  for (let i=0;i<n;i++){
+    const x = 60 + (600/Math.max(1,n-1))*i + rr(-14,14);
+    const e = spawnEnemy(rowK[ri(0,rowK.length-1)], x, baseY + rr(-30,30));
+    if (e) members.push(e);
+  }
+  if (!members.length) return;
+  netWave++;
+  activeWall = { members:members, minY: baseY + 150, total: members.length };
+  addText('围堵 · 第 '+netWave+' 道 · 打穿才能继续推进', P.x, P.y-150, COL.gold, 26);
+}
+function updateWall(){
+  if (!activeWall) return false;
+  let alive = 0;
+  for (const e of activeWall.members) if (!e.dead && e.team===0) alive++;
+  if (alive <= activeWall.total*0.4){
+    activeWall = null;
+    addText('打穿 · 继续推进', P.x, P.y-150, COL.silver, 24);
+    return false;
+  }
+  if (P.y < activeWall.minY){ P.y = activeWall.minY; return true; }  // 挡住去路
+  return false;
+}
+
+function enemyFamily(){ return stage.pool; }
+
+// ============================================================
+//  攻击与命中
+// ============================================================
+function hurtEnemy(e, mul, critForce, rand, srcX, srcY, knock){
+  if (e.dead) return 0;
+  const s = curSoul();
+  // 净域：敌人在阿斗周围承伤降低
+  const FR = fieldR();
+  let netCut = 1;
+  if (d2(e.x,e.y,AD.x,AD.y) < FR*FR) netCut = 1 - BAL.fieldDmgCut;
+  let cross = 1, crit = critForce!==undefined ? critForce : (rnd() < BAL.critRate);
+
+  if (s.id===8){ // 大贤：不造成伤害，改为回复能量
+    e.x += (P.x-e.x)*0.12; e.y += (P.y-e.y)*0.12;
+    P.energy = Math.min(energyMax(), P.energy + 4);
+    return 0;
+  }
+
+  const atk = atkAt(P.level) * dmgMulBonus() * (P.luoyiUntil>T?2:1) * passiveMul(e);
+  const r = calcDamage(atk, mul, e.cfg.def, s.type, e.cfg.wt, crit, rand);
+  let dmg = Math.max(1, Math.floor(r.dmg * netCut * (e.markedUntil>T?1.4:1)));
+
+  // 盾兵正面减伤
+  if (e.cfg.frontGuard){
+    const toE = Math.atan2(e.y-srcY, e.x-srcX);
+    const fw  = e.team===0 ? Math.atan2(P.y-e.y, P.x-e.x) : Math.atan2(e.target?e.target.y-e.y:P.y-e.y, e.target?e.target.x-e.x:P.x-e.x);
+    if (Math.abs(angDiff(toE, fw)) < Math.PI*0.45) dmg = Math.max(1, Math.floor(dmg*(1-e.cfg.frontGuard)));
+  }
+
+  e.hp -= dmg; e.flash = 0.08;
+  if (knock && !e.cfg.elite){
+    const a = Math.atan2(e.y-srcY, e.x-srcX);
+    e.kx = Math.cos(a)*knock; e.ky = Math.sin(a)*knock; e.knock = 0.16;
+  }
+  addFloat(dmg, e.x, e.y-e.cfg.radius*0.6, crit, r.cross);
+  if (e.hp<=0) killEnemy(e);
+  return dmg;
+}
+
+function passiveMul(e){
+  const s = curSoul();
+  if (s.id===4){ // 突骑 远距加成
+    if (d2(e.x,e.y,P.x,P.y) > 250*250) return 1.15;
+  }
+  if (s.id===7){ // 白马 濒死加成
+    if (P.guard<=1) return 1.12;
+  }
+  return 1;
+}
+
+function killEnemy(e){
+  if (e.dead) return;
+  e.dead = true;
+  if (e.tk==='zhanghe'||e.tk==='caochun'||e.tk==='xuchu'){
+    const u = ETYPE[e.tk].unlock;
+    if (unlocked.indexOf(u)<0) unlocked.push(u), unlocked.sort((a,b)=>a-b);
+    addText('武魂到手 · '+SOULS[u].name, e.x, e.y-90, COL.gold, 30);
+  }
+  if (e.team===1) return;   // 被转化的敌兵被杀不计入
+  kills++;
+  P.energy = Math.min(energyMax(), P.energy + BAL.energyPerKill*(curSoul().id===1?1.2:1));
+  netFragBank += e.cfg.frag;
+  if (rnd() < 0.05*buffStack('hui')) P.guard = Math.min(P.guardMax, P.guard+1);
+  for (let i=0;i<3;i++) vfx.push({x:e.x,y:e.y,t:0,life:0.3,a:rr(0,6.28),k:'hit'});
+}
+
+function doAttack(){
+  const s = curSoul();
+  let hits = 0;
+  if (s.shape==='line'){
+    const ex = P.x + Math.cos(P.dir)*s.len, ey = P.y + Math.sin(P.dir)*s.len;
+    const maxHit = s.pierce + pierceBonus();
+    for (const e of enemies){
+      if (e.dead || e.team!==0) continue;
+      if (segDist(e.x,e.y,P.x,P.y,ex,ey) < s.w*0.5 + e.cfg.radius*0.35){
+        hurtEnemy(e, s.mul, undefined, rr(0.95,1.05), P.x, P.y, s.knock||180);
+        if (++hits>=maxHit) break;
+      }
+    }
+    vfx.push({x:P.x,y:P.y,t:0,life:0.18,a:P.dir,k:'slash',len:s.len,w:s.w});
+  }
+  else if (s.shape==='sector'){
+    const half = s.deg*Math.PI/360;
+    for (const e of enemies){
+      if (e.dead || e.team!==0) continue;
+      const ddv = dd(e.x,e.y,P.x,P.y);
+      if (ddv > s.r + e.cfg.radius*0.4) continue;
+      if (Math.abs(angDiff(Math.atan2(e.y-P.y,e.x-P.x), P.dir)) > half) continue;
+      if (s.id===5 && Math.abs(angDiff(Math.atan2(e.y-P.y,e.x-P.x), P.dir)) > Math.PI/2) {
+        hurtEnemy(e, s.mul*1.10, undefined, rr(0.95,1.05), P.x, P.y, s.knock||180);
+      } else {
+        hurtEnemy(e, s.mul, undefined, rr(0.95,1.05), P.x, P.y, s.knock||180);
+      }
+      hits++;
+      if (hits >= (s.maxHit||1)) break;
+    }
+    vfx.push({x:P.x,y:P.y,t:0,life:0.16,a:P.dir,k:'fan',r:s.r,deg:s.deg});
+  }
+  else if (s.shape==='circle'){
+    for (const e of enemies){
+      if (e.dead || e.team!==0) continue;
+      if (dd(e.x,e.y,P.x,P.y) > s.r + e.cfg.radius*0.4) continue;
+      const behind = Math.abs(angDiff(Math.atan2(P.y-e.y,P.x-e.x), P.dir)) > Math.PI/2;
+      hurtEnemy(e, s.mul*(behind?1.10:1), undefined, rr(0.95,1.05), P.x, P.y, s.knock||180);
+      hits++;
+      if (hits >= (s.maxHit||1)) break;
+    }
+    vfx.push({x:P.x,y:P.y,t:0,life:0.22,a:T*6,k:'ring',r:s.r});
+  }
+  else if (s.shape==='throw'){
+    // 穿透数必须是**随弹持久**的计数器：如果每帧重新计算，
+    // 一支箭就会在飞行途中的每一帧都伤到一个新目标，实际命中远超设计值。
+    projs.push({x:P.x,y:P.y,a:P.dir,sp:s.pspeed,life:s.range/s.pspeed,
+                mul:s.mul, back:s.back||0, hit:new Set(), returning:false, hostile:false,
+                pierceLeft: (s.maxHit||1) + pierceBonus(), owner:s.id, r: s.id===6?7:5});
+    hits=1;
+  }
+  else if (s.shape==='grab'){
+    let n=0;
+    for (const e of enemies){
+      if (e.dead||e.team!==0) continue;
+      if (dd(e.x,e.y,P.x,P.y) > s.r) continue;
+      e.x += (P.x-e.x)*0.30; e.y += (P.y-e.y)*0.30;
+      if (++n>=6) break;
+    }
+    P.energy = Math.min(energyMax(), P.energy + 4*Math.max(1,n));
+    vfx.push({x:P.x,y:P.y,t:0,life:0.3,a:T*3,k:'ring',r:s.r});
+  }
+  if (hits>0) sfx('hit');
+}
+
+function segDist(px,py,ax,ay,bx,by){
+  const dx=bx-ax, dy=by-ay, L=dx*dx+dy*dy;
+  let t = L>0 ? ((px-ax)*dx + (py-ay)*dy)/L : 0;
+  t = clamp(t,0,1);
+  const cx=ax+t*dx, cy=ay+t*dy;
+  return dd(px,py,cx,cy);
+}
+
+// ============================================================
+//  绝技（每把武魂一个）
+// ============================================================
+function castUlt(){
+  const s = curSoul();
+  if (P.energy < energyMax()) return;
+  P.energy = 0;
+  const U = s.ult;
+  ultFx = {t:0.45, kind:U};
+  if (U==='qijin'){                       // 龙胆：疾突贯穿，2.5s 无敌
+    P.dash = {a:P.dir, left:980, sp:1500};
+    P.dashHit = new Set();
+    P.invulnUntil = Math.max(P.invulnUntil, T+2.5);
+  }
+  else if (U==='luoyi'){                  // 虎痴：消耗护驾/血，8s 双倍
+    if (P.guard > 0.5) P.guard -= 0.5; else P.hp = Math.max(30, P.hp*0.7);
+    P.luoyiUntil = T + 8;
+    P.invulnUntil = Math.max(P.invulnUntil, T+0.6);
+  }
+  else if (U==='qiaobian'){               // 巧变：全场印记 8s
+    for (const e of enemies) if (!e.dead && e.team===0) e.markedUntil = T+8;
+  }
+  else if (U==='hupao'){                  // 突骑：6 骑横冲
+    for (let i=0;i<6;i++){
+      riders.push({x:-60, y:P.y-180+i*72, a:0, sp:760, life:3.2, dmg:1.6*ultBonus(), hit:new Set()});
+    }
+  }
+  else if (U==='heqiao'){                 // 断后：清屏 + 恐惧 5s
+    for (const e of enemies){
+      if (e.dead||e.team!==0) continue;
+      if (!e.cfg.boss){ e.hp=0; killEnemy(e); }
+      else { e.hp -= Math.floor(atkAt(P.level)*3.5*ultBonus()*dmgMulBonus()); if(e.hp<=0) killEnemy(e); }
+      e.fearUntil = T+5;
+    }
+    shake = 14;
+  }
+  else if (U==='baiqi'){                  // 锦帆：环绕飞刀 8s
+    P.knivesUntil = T+8; P.knives = [];
+    for (let i=0;i<8;i++) P.knives.push({a:i/8*Math.PI*2});
+  }
+  else if (U==='taiguan'){                // 白马：10s 不死
+    P.taiguanUntil = T+10; P.invulnUntil = Math.max(P.invulnUntil, T+10);
+  }
+  else if (U==='tuijian'){                // 大贤：转化 8 个敌兵 5s
+    let n=0;
+    const near = enemies.filter(e=>!e.dead&&e.team===0&&dd(e.x,e.y,P.x,P.y)<420)
+                        .sort((a,b)=>d2(a.x,a.y,P.x,P.y)-d2(b.x,b.y,P.x,P.y));
+    for (const e of near){ if (n>=8) break; e.team=1; e.convertUntil=T+5; e.target=null; n++; }
+  }
+  for (let i=0;i<14;i++) vfx.push({x:P.x,y:P.y,t:0,life:0.5,a:rr(0,6.28),k:'burst'});
+  sfx('ult');
+}
+
+function updateUlt(dt){
+  // 龙胆疾突
+  if (P.dash){
+    const step = Math.min(P.dash.left, P.dash.sp*dt);
+    P.x += Math.cos(P.dash.a)*step; P.y += Math.sin(P.dash.a)*step;
+    P.dash.left -= step;
+    P.dir = P.dash.a;
+    for (const e of enemies){
+      if (e.dead||e.team!==0||P.dashHit.has(e)) continue;
+      if (segDist(e.x,e.y,P.x-Math.cos(P.dash.a)*step,P.y-Math.sin(P.dash.a)*step,P.x,P.y) < 70+e.cfg.radius*0.4){
+        P.dashHit.add(e);
+        hurtEnemy(e, 4.2*ultBonus(), undefined, rr(0.95,1.05), P.x, P.y, 320);
+      }
+    }
+    vfx.push({x:P.x,y:P.y,t:0,life:0.25,a:P.dash.a,k:'trail'});
+    if (P.dash.left<=0){ P.dash=null; P.dashHit=null; }
+  }
+  // 锦帆飞刀
+  if (P.knivesUntil > T && P.knives){
+    for (const k of P.knives){
+      k.a += dt*4.2;
+      const kx = P.x + Math.cos(k.a)*120, ky = P.y + Math.sin(k.a)*120;
+      for (const e of enemies){
+        if (e.dead||e.team!==0) continue;
+        if (!e._kcd || e._kcd < T){
+          if (d2(e.x,e.y,kx,ky) < 26*26){
+            hurtEnemy(e, 0.45*ultBonus(), true, rr(0.95,1.05), kx, ky, 0);
+            e._kcd = T + 0.25;
+          }
+        }
+      }
+    }
+  }
+}
+
+// ============================================================
+//  投射物
+// ============================================================
+function updateProjs(dt){
+  for (let i=projs.length-1;i>=0;i--){
+    const p = projs[i];
+
+    // —— 敌方箭矢：命中玩家，不伤敌兵 ——
+    if (p.hostile){
+      p.x += Math.cos(p.a)*p.sp*dt; p.y += Math.sin(p.a)*p.sp*dt;
+      if (d2(p.x,p.y,P.x,P.y) < 26*26){ damagePlayer(p.atk, null); projs.splice(i,1); continue; }
+      p.life -= dt;
+      if (p.life<=0) projs.splice(i,1);
+      continue;
+    }
+
+    // —— 玩家投射物 ——
+    if (p.returning){
+      // 回程：飞回玩家，造成 50% 伤害（锦帆）
+      const ang = Math.atan2(P.y-p.y, P.x-p.x);
+      p.x += Math.cos(ang)*p.sp*1.4*dt; p.y += Math.sin(ang)*p.sp*1.4*dt;
+      for (const e of enemies){
+        if (e.dead||e.team!==0||p.hit.has(e)) continue;
+        if (p.pierceLeft<=0) break;
+        if (d2(e.x,e.y,p.x,p.y) < (22+e.cfg.radius*0.4)**2){
+          p.hit.add(e); p.pierceLeft--;
+          hurtEnemy(e, p.mul*p.back, undefined, rr(0.95,1.05), p.x, p.y, 90);
+        }
+      }
+      if (d2(p.x,p.y,P.x,P.y) < 30*30){
+        P.energy = Math.min(energyMax(), P.energy+3);
+        projs.splice(i,1); continue;
+      }
+      p.life -= dt;
+      if (p.life<=0) projs.splice(i,1);
+      continue;
+    }
+
+    // 去程
+    if (p.owner===4){ // 突骑：自动追踪最近敌人
+      let best=null,bd=1e9;
+      for (const e of enemies){ if(e.dead||e.team!==0) continue;
+        const v=d2(e.x,e.y,p.x,p.y); if(v<bd){bd=v;best=e;} }
+      if (best){
+        const want = Math.atan2(best.y-p.y, best.x-p.x);
+        p.a += angDiff(want, p.a)*Math.min(1, 7*dt);
+      }
+    }
+    p.x += Math.cos(p.a)*p.sp*dt; p.y += Math.sin(p.a)*p.sp*dt;
+
+    for (const e of enemies){
+      if (e.dead||e.team!==0||p.hit.has(e)) continue;
+      if (p.pierceLeft<=0) break;
+      if (d2(e.x,e.y,p.x,p.y) < (22+e.cfg.radius*0.4)**2){
+        p.hit.add(e); p.pierceLeft--;
+        hurtEnemy(e, p.mul, undefined, rr(0.95,1.05), p.x, p.y, 120);
+      }
+    }
+    p.life -= dt;
+    if (p.life<=0){
+      if (p.back>0){ p.returning=true; p.life=2.2; p.hit.clear(); p.pierceLeft=(SOULS[5].maxHit||1)+pierceBonus(); }
+      else projs.splice(i,1);
+    }
+  }
+}
+
+// ============================================================
+//  更新：玩家
+// ============================================================
+function updatePlayer(dt){
+  // 移动
+  let mx=0,my=0;
+  if (keys['a']||keys['ArrowLeft'])  mx-=1;
+  if (keys['d']||keys['ArrowRight']) mx+=1;
+  if (keys['w']||keys['ArrowUp'])    my-=1;
+  if (keys['s']||keys['ArrowDown'])  my+=1;
+  P.moveTrue = (mx||my);
+  const L = Math.hypot(mx,my)||1;
+  if (!P.dash){                       // 疾突期间锁手动移动
+    const sp = BAL.playerSpeed*speedBonus();
+    P.x += mx/L*sp*dt; P.y += my/L*sp*dt;
+  }
+  P.x = clamp(P.x, 40, CW-40);
+  // 朝向：始终朝最近的敌人（自动瞄准），没有敌人时朝移动方向
+  let best=null,bd=1e9;
+  for (const e of enemies){ if(e.dead||e.team!==0) continue; const v=d2(e.x,e.y,P.x,P.y); if(v<bd){bd=v;best=e;} }
+  if (best && bd < 420*420) P.dir = Math.atan2(best.y-P.y, best.x-P.x);
+  else if (mx||my) P.dir = Math.atan2(my,mx);
+
+  // 阿斗跟随（插值，不成立等熬夜）
+  AD.x += (P.x - AD.x)*Math.min(1, BAL.adouFollow*dt);
+  AD.y += (P.y + 46 - AD.y)*Math.min(1, BAL.adouFollow*dt);
+
+  // 自动普攻
+  const s = curSoul();
+  if (!recover && T > P.stunUntil){
+    const rate = s.rate * (P.moveTrue && s.id===6 ? 1.08 : 1);
+    P.atkTimer -= dt*rate;
+    if (P.atkTimer<=0){ P.atkTimer = 1; doAttack(); }
+  }
+
+  // 切武魂（含 0.3s 无敌帧）
+  if (!recover && (once('Shift')||once('Tab')||once('q')) && T>=P.swapReadyAt){
+    const other = P.cur===P.main ? P.sub : P.main;
+    if (other!==P.cur){
+      const prev = P.cur;
+      P.cur = other;
+      P.swapReadyAt = T + swapCd();
+      P.invulnUntil = Math.max(P.invulnUntil, T + BAL.switchInvincible);
+      P.atkTimer = 0.35;
+      ultFx = {t:0.25, kind:'swap'};
+      sfx('swap');
+    }
+  }
+  // 绝技
+  if (!recover && once(' ') && P.energy>=energyMax()) castUlt();
+
+  updateUlt(dt);
+
+  // 距离推进（只算向上的净位移）
+  distM = Math.max(0, (startY - P.y) / BAL.pxPerM);
+}
+
+// 敌人攻击玩家
+function enemiesAttack(dt){
+  for (const e of enemies){
+    if (e.dead || e.team!==0) continue;
+    if (e.fearUntil > T){ // 恐惧：逃离
+      const a = Math.atan2(e.y-P.y, e.x-P.x);
+      e.x += Math.cos(a)*e.cfg.speed*0.8*dt; e.y += Math.sin(a)*e.cfg.speed*0.8*dt;
+      continue;
+    }
+    const reach = e.cfg.ranged ? e.cfg.radius : e.cfg.radius*0.5 + 30;
+    const dist = dd(e.x,e.y,P.x,P.y);
+    if (dist > reach) continue;
+    e.cd -= dt;
+    if (e.cd>0) continue;
+    e.cd = e.cfg.cd;
+    if (e.cfg.ranged){
+      projs.push({x:e.x,y:e.y,a:Math.atan2(P.y-e.y,P.x-e.x),sp:430,life:2.2,
+                  phase:0, hostile:true, atk:e.cfg.atk*0.6, r:5});
+      continue;
+    }
+    // 背后受击加成
+    const behind = Math.abs(angDiff(Math.atan2(e.y-P.y,e.x-P.x)+Math.PI, P.dir)) < Math.PI*0.5;
+    damagePlayer(e.cfg.atk*(behind?BAL.backHitMul:1), e);
+  }
+}
+
+function damagePlayer(amount, e){
+  if (T < P.invulnUntil) return;
+  if (P.taiguanUntil > T) return;
+  P.hp -= amount;
+  P.invulnUntil = T + BAL.invincible;
+  P.stunUntil = T + BAL.hurtStun;
+  shake = 8;
+  addFloat(amount, P.x, P.y-60, false, 1, true);
+  sfx('hurt');
+  // 虎痴被动：受击 15% 反击
+  if (curSoul().id===2 && rnd()<0.15 && e && !e.dead) hurtEnemy(e, 1.4, true, rr(0.95,1.05), P.x,P.y, 300);
+
+  // 敌兵在阿斗 60px 内命中 -> 扣护驾值（带内部 CD，被围时不会瞬间掉光）
+  if (e && d2(e.x,e.y,AD.x,AD.y) < BAL.nearAdou*BAL.nearAdou && T>=guardIcdUntil){
+    guardIcdUntil = T + 1.2;
+    P.guard = Math.max(0, P.guard - BAL.guardHitCost);
+    flashGuard = 0.5;
+    if (P.guard<=0) triggerRecover('阿斗被夺');
+  }
+  if (P.hp<=0 && !recover) triggerRecover('力竭');
+}
+// 统一的失败缓冲：护驾归零或血量见底 -> 3 秒夺回窗口
+function triggerRecover(reason){
+  if (recover) return;
+  recover = {until:T+BAL.recoverWindow, need:BAL.recoverPress, reason:reason};
+  timeScale = 0.3;
+  addText(reason+' · 连按空格夺回', P.x, P.y-160, COL.danger, 26);
+  sfx('hurt');
+}
+
+function updateRecover(dt){
+  if (!recover) return;
+  if (once(' ')) { recover.need--; sfx('swap'); }
+  if (recover.need<=0){
+    P.guard = Math.max(P.guard, 1);
+    P.hp = Math.max(P.hp, P.hpMax*0.6);
+    guardIcdUntil = T + 1.0;
+    recover=null; timeScale=1;
+    P.invulnUntil = Math.max(P.invulnUntil, T+1.2);
+    addText('夺回', P.x, P.y-140, COL.gold, 30);
+    sfx('ult');
+  } else if (T>=recover.until){
+    recover=null; timeScale=1; gameOver();
+  }
+}
+
+// ============================================================
+//  更新：敌人 AI
+// ============================================================
+function updateEnemies(dt){
+  for (let i=enemies.length-1;i>=0;i--){
+    const e = enemies[i];
+    if (e.dead){ enemies.splice(i,1); continue; }
+    // 转化到期还原
+    if (e.team===1 && T>e.convertUntil){ e.team=0; e.target=null; e.convertUntil=0; }
+
+    let tx, ty;
+    if (e.team===1){ // 被转化：打敌兵
+      let best=null,bd=1e9;
+      for (const o of enemies){ if(o===e||o.dead||o.team!==0) continue;
+        const v=d2(o.x,o.y,e.x,e.y); if(v<bd){bd=v;best=o;} }
+      if (best){ tx=best.x; ty=best.y; e.target=best; }
+      else { tx=P.x; ty=P.y; }
+    } else { tx=P.x; ty=P.y; }
+
+    // 净域减速
+    const FR = fieldR();
+    let spd = e.cfg.speed;
+    const inNet = d2(e.x,e.y,AD.x,AD.y) < FR*FR;
+    if (inNet) spd *= (1-BAL.fieldSlow);
+
+    const a = Math.atan2(ty-e.y, tx-e.x);
+    e.wob += dt*7;
+    const wobble = Math.sin(e.wob)*8;
+
+    // 击退
+    if (e.knock>0){
+      e.knock -= dt;
+      e.x += e.kx*dt*6; e.y += e.ky*dt*6;
+      e.kx *= 0.86; e.ky *= 0.86;
+    }
+
+    const attackRange = e.cfg.ranged ? e.cfg.radius*0.75 : e.cfg.radius*0.45+26;
+    const dist = dd(e.x,e.y,tx,ty);
+    if (dist > attackRange){
+      e.x += Math.cos(a)*spd*dt; e.y += (Math.sin(a)*spd + wobble*0.15)*dt;
+    }
+    // 分离，防叠成一坨
+    for (let j=Math.max(0,i-6); j<i; j++){
+      const o = enemies[j];
+      if (o.dead) continue;
+      const mn = (e.cfg.radius+o.cfg.radius)*0.42;
+      const v = d2(e.x,e.y,o.x,o.y);
+      if (v < mn*mn && v>0){
+        const dist2=Math.sqrt(v), push=(mn-dist2)*0.5;
+        const pa=Math.atan2(e.y-o.y,e.x-o.x);
+        e.x += Math.cos(pa)*push; e.y += Math.sin(pa)*push;
+      }
+    }
+    e.face = Math.cos(a)>=0 ? 1 : -1;
+    e.anim += dt*6;
+    if (e.flash>0) e.flash -= dt;
+
+    // 转化部队攻击敌兵
+    if (e.team===1 && e.target && dd(e.x,e.y,e.target.x,e.target.y) < e.cfg.radius*0.5+26){
+      e.cd -= dt;
+      if (e.cd<=0){ e.cd = e.cfg.cd; hurtAllyHit(e.target, e.cfg.atk*0.9); }
+    }
+  }
+}
+function hurtAllyHit(t, amt){
+  if (!t || t.dead) return;
+  t.hp -= amt; t.flash=0.08;
+  addFloat(Math.floor(amt), t.x, t.y-20, false, 1);
+  if (t.hp<=0){ t.dead=true; }   // 不计入玩家战绩
+}
+
+// ============================================================
+//  三选一
+// ============================================================
+function rollBuffs(){
+  const pool = BUFFS.filter(b=>{
+    const max = b.max || 99;
+    return (P.buffs[b.id]||0) < max;
+  });
+  const picks = [];
+  const bag = pool.slice();
+  for (let i=0;i<3 && bag.length;i++){
+    const k = ri(0, bag.length-1);
+    picks.push(bag.splice(k,1)[0]);
+  }
+  if (picks.length===0) picks.push({id:'coin',name:'赏金',desc:'立刻 +300 铜钱',icon:'钱',max:99});
+  return picks;
+}
+function openBuffSelect(){
+  buffChoices = rollBuffs();
+  screen = 'buff';
+}
+function pickBuff(i){
+  const b = buffChoices[i];
+  if (!b) return;
+  if (b.id==='coin'){ addText('+300 铜钱', P.x, P.y-120, COL.gold, 24); }
+  else {
+    P.buffs[b.id] = (P.buffs[b.id]||0)+1;
+    if (b.id==='yu'){ P.guardMax = 3 + P.buffs['yu']; P.guard = Math.min(P.guardMax, P.guard+1); }
+  }
+  sfx('swap');
+  screen = 'play';
+}
+
+// ============================================================
+//  胜负
+// ============================================================
+function checkStage(){
+  const needDist = distM >= stage.dist, needKill = kills >= stage.kills;
+  if (stage.boss){
+    const bossAlive = enemies.some(e=>!e.dead && e.cfg.boss);
+    if (needKill && !bossAlive && distM>=stage.dist*0.4) win();
+    return;
+  }
+  if (needDist && needKill) win();
+}
+function win(){
+  screen = 'clear';
+  result = { win:true, kills, distM:Math.floor(distM), lv:P.level+1 };
+  sfx('ult');
+}
+function gameOver(){
+  screen = 'over';
+  result = { win:false, kills, distM:Math.floor(distM), lv:P.level };
+}
+
+// ============================================================
+//  反馈
+// ============================================================
+let floatPool = [];
+const lastSfx = {};
+function addFloat(v,x,y,crit,cross,isPlayer){
+  texts.push({v:Math.floor(v),x:x+rr(-8,8),y:y,t:0,life:0.7,crit:crit,cross:cross,pl:isPlayer});
+}
+function addText(s,x,y,c,size){ vfx.push({x:x,y:y,t:0,life:1.1,k:'text',s:s,c:c,size:size||22}); }
+let flashGuard = 0;
+
+// ============================================================
+//  音效（极简合成，M 键开关）
+// ============================================================
+let AC=null, muted=false;
+function sfx(k){
+  if (muted) return;
+  if (lastSfx[k] && T - lastSfx[k] < 0.045) return;   // 节流，避免同帧几十个 oscillator
+  lastSfx[k] = T;
+  try{
+    if (!AC) AC = new (window.AudioContext||window.webkitAudioContext)();
+    const o=AC.createOscillator(), g=AC.createGain();
+    const m={hit:[220,0.05,'square',0.05],ult:[90,0.5,'sawtooth',0.10],
+             swap:[520,0.12,'triangle',0.07],hurt:[120,0.18,'sawtooth',0.09],
+             pick:[700,0.1,'sine',0.07]}[k] || [300,0.06,'sine',0.05];
+    o.type=m[2]; o.frequency.value=m[0];
+    o.frequency.exponentialRampToValueAtTime(Math.max(40,m[0]*0.5), AC.currentTime+m[1]);
+    g.gain.setValueAtTime(m[3], AC.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.0001, AC.currentTime+m[1]);
+    o.connect(g); g.connect(AC.destination); o.start(); o.stop(AC.currentTime+m[1]+0.02);
+  }catch(err){}
+}
+
+// ============================================================
+//  绘制
+// ============================================================
+let camY = 0;
+function camTop(){ return P.y - 810; }
+
+function draw(){
+  camY = camTop();
+  X.setTransform(1,0,0,1,0,0);
+  X.fillStyle = '#0E0C09'; X.fillRect(0,0,CW,CH);
+
+  X.save();
+  X.translate(0, -camY + (shake?rr(-shake,shake):0));
+
+  drawGround();
+  drawNetField();
+  drawEnemies();
+  drawRiders();
+  drawProjs();
+  drawVfx();
+  drawPlayer();
+  drawAdou();
+
+  X.restore();
+
+  drawFloats();
+  if (ultFx.t>0) drawUltFlash();
+  if (flashGuard>0) drawGuardAlarm();
+  if (stage && screen!=='title' && screen!=='select') drawHud();
+  if (paused && screen==='play') drawPause();
+
+  if (screen==='title') drawTitle();
+  if (screen==='select') drawSelect();
+  if (screen==='buff') drawBuffPanel();
+  if (screen==='clear') drawResult(true);
+  if (screen==='over')  drawResult(false);
+}
+
+function hash2(x,y){
+  let h = (x*374761393 + y*668265263) >>> 0;
+  h = (h ^ (h>>>13)) * 1274126177 >>> 0;
+  return ((h ^ (h>>>16)) >>> 0)/4294967296;
+}
+function drawGround(){
+  X.fillStyle = COL.ground;
+  X.fillRect(0, camY-40, CW, CH+80);
+  const y0 = Math.floor((camY-80)/80)*80;
+  for (let y=y0; y<camY+CH+80; y+=80){
+    for (let k=0;k<8;k++){
+      const gx = hash2(k, y/80|0), gy = hash2(k*7+1, y/80|0);
+      const px = gx*CW, py = y + gy*80;
+      const s = 60 + gx*90;
+      X.fillStyle = 'rgba(85,72,58,0.45)';
+      X.fillRect(px-s/2, py-6, s, 14);
+    }
+  }
+  // 地平线装饰：营帐与火把远景
+  X.fillStyle = 'rgba(85,72,58,0.55)';
+  const y1 = Math.floor((camY-200)/260)*260;
+  for (let y=y1; y<camY+CH+260; y+=260){
+    for (let k=0;k<4;k++){
+      const gx = hash2(k*13+5, y/260|0);
+      const px = 40 + gx*(CW-120);
+      X.beginPath();
+      X.moveTo(px-46, y+120); X.lineTo(px, y+58); X.lineTo(px+46, y+120); X.closePath(); X.fill();
+      X.fillStyle = 'rgba(240,185,60,0.35)';
+      X.fillRect(px+44, y+84, 6, 30);
+      X.fillStyle = 'rgba(85,72,58,0.55)';
+    }
+  }
+  // 竖向推进参考线
+  X.strokeStyle='rgba(161,138,110,0.18)'; X.lineWidth=2;
+  const gy0=Math.floor((camY-100)/240)*240;
+  for (let y=gy0;y<camY+CH+240;y+=240){
+    X.beginPath(); X.moveTo(0,y); X.lineTo(CW,y); X.stroke();
+  }
+}
+
+function drawNetField(){
+  const R = fieldR();
+  X.save();
+  X.globalAlpha = 0.16;
+  X.fillStyle = '#9FE1CB';
+  X.beginPath(); X.arc(AD.x, AD.y, R, 0, 6.2832); X.fill();
+  X.globalAlpha = 0.5; X.strokeStyle='#5DCAA5'; X.lineWidth=2;
+  X.beginPath(); X.arc(AD.x, AD.y, R*(0.86+Math.sin(T*2)*0.05), 0, 6.2832); X.stroke();
+  X.restore();
+}
+
+function stroke(fill){
+  X.fillStyle=fill; X.strokeStyle=COL.line; X.lineJoin='round';
+}
+
+function drawEnemies(){
+  for (const e of enemies){
+    if (e.dead) continue;
+    X.save();
+    X.translate(e.x, e.y);
+    const sc = e.cfg.scale;
+    X.scale(e.face*sc, sc);
+    const w = e.cfg.elite ? 34 : 24, h = e.cfg.elite ? 40 : 30;
+    // 身体（几何块面）
+    stroke(e.team===1 ? '#5DCAA5' : COL.enemy); X.lineWidth=3;
+    X.beginPath(); X.rect(-w/2, -h, w, h); X.fill(); X.stroke();
+    // 辅色护甲块
+    X.fillStyle = e.team===1 ? '#085041' : COL.enemySub;
+    X.fillRect(-w/2+3, -h+5, w-6, 9);
+    // 头
+    stroke('#B4B2A9'); X.lineWidth=3;
+    X.beginPath(); X.arc(0, -h-9, 7.5, 0, 6.2832); X.fill(); X.stroke();
+    // 兵器
+    stroke(COL.mute); X.lineWidth=3;
+    if (e.tk==='dunbing'){ X.fillRect(8, -h+4, 10, 20); X.strokeRect(8,-h+4,10,20); }
+    else if (e.tk==='gongbing'){ X.beginPath(); X.arc(10,-h*0.5,12,-1.1,1.1); X.stroke(); }
+    else if (e.tk==='hupao'){
+      X.fillStyle = COL.enemySub;
+      X.beginPath(); X.ellipse(0,-14,26,15,0,0,6.2832); X.fill(); X.stroke(); // 马身
+      X.strokeStyle=COL.line; X.lineWidth=3;
+      X.beginPath(); X.moveTo(-16,-6); X.lineTo(-20,10); X.moveTo(14,-6); X.lineTo(18,10); X.stroke();
+      X.beginPath(); X.moveTo(-4,-30); X.lineTo(24,-42); X.stroke();          // 长兵（注意：不画马镫）
+    }
+    else { X.beginPath(); X.moveTo(8,-h*0.6); X.lineTo(26,-h*1.1); X.stroke(); }
+    // 受击白闪
+    if (e.flash>0){ X.globalAlpha=0.75; X.fillStyle='#FFFFFF';
+      X.fillRect(-w/2,-h-18,w,h+22); X.globalAlpha=1; }
+    // 印记
+    if (e.markedUntil>T){ X.strokeStyle=COL.gold; X.lineWidth=2;
+      X.beginPath(); X.arc(0,-h*0.5, e.cfg.elite?34:26, 0, 6.2832); X.stroke(); }
+    X.restore();
+
+    if (e.cfg.elite || e.cfg.boss){
+      const bw = e.cfg.boss?150:70, bh=6;
+      X.fillStyle='#16120F'; X.fillRect(e.x-bw/2, e.y-e.cfg.radius*0.6-16, bw, bh);
+      X.fillStyle= e.cfg.boss?COL.danger:'#C0392B';
+      X.fillRect(e.x-bw/2, e.y-e.cfg.radius*0.6-16, bw*clamp(e.hp/e.hpMax,0,1), bh);
+      X.fillStyle=COL.line; X.strokeRect(e.x-bw/2, e.y-e.cfg.radius*0.6-16, bw, bh);
+      if (e.cfg.boss){
+        X.fillStyle=COL.silver; X.font='500 18px sans-serif'; X.textAlign='center';
+        X.fillText(e.cfg.name, e.x, e.y-e.cfg.radius*0.6-24);
+      }
+    }
+  }
+}
+
+function drawRiders(){
+  for (const r of riders){
+    X.save(); X.translate(r.x, r.y);
+    stroke('#8A8478'); X.lineWidth=3;
+    X.beginPath(); X.rect(-16,-14,32,26); X.fill(); X.stroke();
+    X.fillStyle=COL.enemySub; X.beginPath(); X.ellipse(-2,12,20,10,0,0,6.2832); X.fill(); X.stroke();
+    X.strokeStyle=COL.line; X.beginPath(); X.moveTo(10,-8); X.lineTo(34,-20); X.stroke();
+    X.restore();
+  }
+}
+
+function drawProjs(){
+  for (const p of projs){
+    X.save(); X.translate(p.x,p.y); X.rotate(p.a);
+    if (p.hostile){ X.fillStyle=COL.danger; X.fillRect(-9,-2,18,4); }
+    else if (p.home){ X.fillStyle=COL.silver; X.beginPath(); X.arc(0,0,5,0,6.2832); X.fill();
+      X.strokeStyle=COL.line; X.lineWidth=2; X.stroke(); }
+    else { X.strokeStyle=COL.silver; X.lineWidth=4;
+      X.beginPath(); X.moveTo(-16,0); X.lineTo(16,0); X.stroke(); }
+    X.restore();
+  }
+}
+
+function drawVfx(){
+  for (const v of vfx){
+    const k = clamp(1 - v.t/v.life, 0, 1);
+    X.save(); X.translate(v.x,v.y);
+    if (v.k==='slash'){
+      X.rotate(v.a); X.globalAlpha=k*0.8; X.fillStyle='#FFFFFF';
+      X.fillRect(0,-v.w/2, v.len, v.w);
+    } else if (v.k==='fan'){
+      X.rotate(v.a); X.globalAlpha=k*0.5; X.fillStyle='#FFFFFF';
+      X.beginPath(); X.moveTo(0,0);
+      X.arc(0,0,v.r, -v.deg*Math.PI/360, v.deg*Math.PI/360); X.closePath(); X.fill();
+    } else if (v.k==='ring'){
+      X.globalAlpha=k*0.55; X.strokeStyle=COL.gold; X.lineWidth=5;
+      X.beginPath(); X.arc(0,0,v.r*(1.1-k*0.25),0,6.2832); X.stroke();
+    } else if (v.k==='hit'){
+      X.globalAlpha=k*0.8; X.fillStyle=COL.gold;
+      const m=Math.cos(v.a), n=Math.sin(v.a);
+      X.fillRect(m*10-3, n*10-3, 6,6);
+    } else if (v.k==='burst'){
+      X.globalAlpha=k*0.7; X.fillStyle=COL.gold;
+      X.beginPath(); X.arc(Math.cos(v.a)*(1-k)*40, Math.sin(v.a)*(1-k)*40, 5*k+2, 0, 6.2832); X.fill();
+    } else if (v.k==='trail'){
+      X.rotate(v.a); X.globalAlpha=k*0.35; X.fillStyle=COL.silver;
+      X.fillRect(-120,-24,240,48);
+    } else if (v.k==='text'){
+      X.globalAlpha=Math.min(1,k*1.6);
+      X.fillStyle=v.c; X.font='500 '+v.size+'px sans-serif'; X.textAlign='center';
+      X.strokeStyle=COL.line; X.lineWidth=4;
+      X.strokeText(v.s, 0, -v.t*40); X.fillText(v.s, 0, -v.t*40);
+    }
+    X.restore();
+  }
+}
+
+function drawPlayer(){
+  const s = curSoul();
+  X.save();
+  X.translate(P.x, P.y);
+  // 360画廊 - 侧面
+  const lean = Math.cos(P.dir)>=0 ? 1 : -1;
+  X.scale(lean, 1);
+
+  if (P.dash){ X.globalAlpha = 0.9; }
+  const walking = P.moveTrue;
+  const bob = walking ? Math.sin(T*14)*3 : Math.sin(T*2.2)*1.2;
+
+  // 长枪／武器始终在右手，所以依照朝向镜像整体
+  X.translate(0, bob);
+  // 战袍（梯形朱红块面）
+  stroke(COL.vermilion); X.lineWidth=3;
+  X.beginPath();
+  X.moveTo(-15, 0); X.lineTo(15, 0); X.lineTo(11, -34); X.lineTo(-11, -34); X.closePath();
+  X.fill(); X.stroke();
+  // 银甲（札甲：一排排矩形块）
+  const inv = T < P.invulnUntil;
+  X.fillStyle = inv ? '#FFFFFF' : COL.silver;
+  X.strokeStyle = COL.line; X.lineWidth=2;
+  for (let r=0;r<3;r++){
+    for (let c=0;c<3;c++){
+      X.fillRect(-10+c*7, -34+r*8, 6, 7);
+      X.strokeRect(-10+c*7, -34+r*8, 6, 7);
+    }
+  }
+  // 头 + 帻
+  stroke('#E8D9C0'); X.lineWidth=3;
+  X.beginPath(); X.arc(0, -48, 9, 0, 6.2832); X.fill(); X.stroke();
+  X.fillStyle='#4E5344'; X.beginPath(); X.arc(0,-52,9.6,Math.PI,0); X.fill(); X.stroke();
+  // 手臂与武器
+  X.save();
+  X.translate(12, -30);
+  X.rotate(clamp(Math.sin(P.dir>0||true? Math.atan2(Math.sin(P.dir),Math.cos(P.dir)*lean):0)*0.4,-0.6,0.6));
+  drawWeapon(s, lean);
+  X.restore();
+  if (P.luoyiUntil>T){ // 裸衣血战
+    X.globalAlpha=0.35; X.fillStyle=COL.danger;
+    X.beginPath(); X.arc(0,-24,44,0,6.2832); X.fill(); X.globalAlpha=1;
+  }
+  if (P.taiguanUntil>T){
+    X.strokeStyle=COL.gold; X.lineWidth=3; X.globalAlpha=0.8;
+    X.beginPath(); X.arc(0,-24,50,0,6.2832); X.stroke(); X.globalAlpha=1;
+  }
+  // 无敌帧提示
+  if (inv && !P.dash){
+    X.globalAlpha=0.45; X.strokeStyle=COL.silver; X.lineWidth=2;
+    X.beginPath(); X.arc(0,-24,38,0,6.2832); X.stroke(); X.globalAlpha=1;
+  }
+  X.restore();
+}
+
+function drawWeapon(s, lean){
+  X.rotate(Math.atan2(Math.sin(P.dir), Math.cos(P.dir)*lean));
+  X.strokeStyle=COL.line; X.lineWidth=3;
+  X.lineCap='round';
+  const shoot = (Math.max(0, 1 - P.atkTimer*4));
+  const reach = 26 + shoot*14;
+  switch(s.id){
+    case 1: // 亮银枪
+      X.strokeStyle='#8A6B3A'; X.lineWidth=5;
+      X.beginPath(); X.moveTo(0,0); X.lineTo(reach+58,0); X.stroke();
+      X.fillStyle=COL.silver; X.strokeStyle=COL.line; X.lineWidth=2.5;
+      X.beginPath(); X.moveTo(reach+58,0); X.lineTo(reach+92,-5); X.lineTo(reach+92,5); X.closePath();
+      X.fill(); X.stroke();
+      break;
+    case 2: // 重槊
+      X.strokeStyle='#6B4A2A'; X.lineWidth=7;
+      X.beginPath(); X.moveTo(0,0); X.lineTo(reach+50,0); X.stroke();
+      X.fillStyle=COL.mute; X.strokeStyle=COL.line; X.lineWidth=2.5;
+      X.fillRect(reach+50,-11,26,22); X.strokeRect(reach+50,-11,26,22);
+      break;
+    case 3: // 双钩
+      X.strokeStyle=COL.line; X.lineWidth=4;
+      X.beginPath(); X.arc(reach+18,0,16,-0.9,0.9); X.stroke();
+      X.beginPath(); X.arc(reach+18-14,0,16,-0.9,0.9); X.stroke();
+      break;
+    case 4: // 弓
+      X.strokeStyle='#8A6B3A'; X.lineWidth=4;
+      X.beginPath(); X.arc(reach+16,0,22,-1.15,1.15); X.stroke();
+      X.strokeStyle=COL.silver; X.lineWidth=1.5;
+      X.beginPath(); X.moveTo(reach+16+Math.cos(1.15)*22, Math.sin(-1.15)*22);
+      X.lineTo(reach+16+Math.cos(1.15)*22, Math.sin(1.15)*22); X.stroke();
+      break;
+    case 5: // 丈八蛇矛
+      X.strokeStyle='#6B4A2A'; X.lineWidth=5;
+      X.beginPath(); X.moveTo(0,0); X.lineTo(reach+70,0); X.stroke();
+      X.fillStyle=COL.silver; X.strokeStyle=COL.line; X.lineWidth=2.5;
+      X.beginPath(); X.moveTo(reach+70,0);
+      X.quadraticCurveTo(reach+96,-8, reach+104,2);
+      X.quadraticCurveTo(reach+92,4, reach+70,6); X.closePath(); X.fill(); X.stroke();
+      break;
+    case 6: // 短刀链
+      X.fillStyle=COL.silver; X.strokeStyle=COL.line; X.lineWidth=2.5;
+      X.beginPath(); X.moveTo(0,-3); X.lineTo(reach+30,-3); X.lineTo(reach+40,0);
+      X.lineTo(reach+30,3); X.lineTo(0,3); X.closePath(); X.fill(); X.stroke();
+      break;
+    case 7: // 长刀
+      X.fillStyle=COL.silver; X.strokeStyle=COL.line; X.lineWidth=2.5;
+      X.beginPath(); X.moveTo(0,-4); X.lineTo(reach+56,-6); X.lineTo(reach+70,2);
+      X.lineTo(reach+40,7); X.lineTo(0,4); X.closePath(); X.fill(); X.stroke();
+      X.strokeStyle='#6B4A2A'; X.lineWidth=4;
+      X.beginPath(); X.moveTo(-12,0); X.lineTo(4,0); X.stroke();
+      break;
+    case 8: // 拂尘
+      X.strokeStyle='#8A6B3A'; X.lineWidth=4;
+      X.beginPath(); X.moveTo(0,0); X.lineTo(reach+34,0); X.stroke();
+      X.strokeStyle=COL.silver; X.lineWidth=2;
+      for (let i=0;i<7;i++){
+        X.beginPath(); X.moveTo(reach+34,0);
+        X.lineTo(reach+58, -14+i*5 + Math.sin(T*6+i)*3); X.stroke();
+      }
+      break;
+  }
+}
+
+function drawAdou(){
+  X.save(); X.translate(AD.x, AD.y);
+  const happy = P.guard>=P.guardMax;
+  stroke('#E8D9C0'); X.lineWidth=3;
+  X.beginPath(); X.ellipse(0,-8,13,11,0,0,6.2832); X.fill(); X.stroke();
+  X.fillStyle=happy?'#E8D9C0':COL.danger;
+  X.beginPath(); X.arc(0,-18,6,0,6.2832); X.fill(); X.stroke();
+  X.fillStyle='#B4B2A9';
+  X.beginPath(); X.moveTo(-13,-20); X.lineTo(13,-20); X.lineTo(9,-30); X.lineTo(-9,-30); X.closePath(); X.fill();
+  X.restore();
+}
+
+function drawFloats(){
+  X.textAlign='center';
+  for (const t of texts){
+    const k = clamp(1 - t.t/t.life, 0, 1);
+    X.save();
+    X.globalAlpha = k;
+    X.font = '500 ' + (t.crit?26:20) + 'px sans-serif';
+    let c = '#FFFFFF';
+    if (t.pl) c = COL.danger;
+    else if (t.crit) c = COL.gold;
+    else if (t.cross>1) c = COL.vermilion;
+    else if (t.cross<1) c = '#B4B2A9';
+    const sy = t.y - camY - (1-k)*46;
+    X.strokeStyle=COL.line; X.lineWidth=4;
+    X.strokeText(t.v, t.x, sy); X.fillStyle=c; X.fillText(t.v, t.x, sy);
+    X.restore();
+  }
+}
+
+function drawUltFlash(){
+  const k = ultFx.t/0.45;
+  X.save();
+  X.globalAlpha = k*0.5;
+  X.fillStyle = ultFx.kind==='swap' ? COL.silver : COL.gold;
+  X.fillRect(0,0,CW,CH);
+  X.restore();
+}
+function drawGuardAlarm(){
+  X.save();
+  X.globalAlpha = Math.abs(Math.sin(T*14))*0.5;
+  X.strokeStyle=COL.danger; X.lineWidth=22;
+  X.strokeRect(11,11,CW-22,CH-22);
+  X.restore();
+}
+
+// ---------- HUD ----------
+function drawHud(){
+  X.save();
+  // 顶部条
+  X.fillStyle='rgba(22,18,15,0.72)'; X.fillRect(0,0,CW,86);
+  // 护驾值（层）
+  for (let i=0;i<P.guardMax;i++){
+    const on = P.guard > i;
+    const partial = !on && P.guard > i-0.5;
+    X.fillStyle = on ? COL.gold : (partial? 'rgba(240,185,60,0.4)' : 'rgba(180,178,169,0.25)');
+    X.beginPath(); X.arc(34+i*30, 30, 12, 0, 6.2832); X.fill();
+    X.strokeStyle=COL.line; X.lineWidth=2; X.stroke();
+  }
+  X.fillStyle=COL.silver; X.font='500 13px sans-serif'; X.textAlign='left';
+  X.fillText('护驾', 34-((P.guardMax*30)/2)+4, 60);
+
+  // 生命
+  X.fillStyle='rgba(180,178,169,0.25)'; X.fillRect(150,22,240,16);
+  X.fillStyle=COL.danger; X.fillRect(150,22,240*clamp(P.hp/P.hpMax,0,1),16);
+  X.strokeStyle=COL.line; X.lineWidth=2; X.strokeRect(150,22,240,16);
+  X.fillStyle=COL.silver; X.fillText(Math.ceil(P.hp)+' / '+P.hpMax, 152, 50);
+
+  // 能量
+  const emax = energyMax();
+  X.fillStyle='rgba(180,178,169,0.25)'; X.fillRect(150,58,240,12);
+  X.fillStyle= P.energy>=emax ? COL.gold : '#185FA5';
+  X.fillRect(150,58,240*clamp(P.energy/emax,0,1),12);
+  X.strokeStyle=COL.line; X.lineWidth=2; X.strokeRect(150,58,240,12);
+  X.fillStyle=COL.silver; X.font='500 12px sans-serif';
+  X.fillText(P.energy>=emax ? '绝技就绪 [空格]' : '绝技 '+Math.floor(P.energy)+'%', 152, 80);
+
+  // 关卡 / 目标
+  X.textAlign='right'; X.fillStyle=COL.silver; X.font='500 16px sans-serif';
+  X.fillText('第'+stage.no+'关 · '+stage.name, CW-20, 30);
+  X.font='500 14px sans-serif';
+  X.fillStyle = kills>=stage.kills ? COL.gold : COL.mute;
+  X.fillText('击杀 '+kills+' / '+stage.kills, CW-20, 54);
+  X.fillStyle = distM>=stage.dist ? COL.gold : COL.mute;
+  X.fillText('突围 '+Math.floor(distM)+' / '+stage.dist+' m', CW-20, 76);
+
+  // 武魂双持槽（右下）
+  drawSlot(CW-150, CH-120, P.main, P.cur===P.main);
+  drawSlot(CW-60,  CH-120, P.sub,  P.cur===P.sub);
+  X.textAlign='center'; X.fillStyle=COL.silver; X.font='500 13px sans-serif';
+  X.fillText('主', CW-115, CH-146); X.fillText('副', CW-25, CH-146);
+  const ready = T>=P.swapReadyAt;
+  X.fillStyle = ready? COL.gold : COL.mute; X.font='500 12px sans-serif';
+  X.textAlign='right';
+  X.fillText(ready? '[Shift] 切武魂 · 0.3s 无敌' : '切换冷却 '+ (P.swapReadyAt-T).toFixed(1)+'s', CW-20, CH-30);
+
+  // 左侧强化图标
+  let bi=0;
+  for (const id in P.buffs){
+    if (!P.buffs[id]) continue;
+    const b = BUFFS.filter(x=>x.id===id)[0];
+    if (!b) continue;
+    const x = 26, y = 130 + bi*44;
+    X.fillStyle='rgba(22,18,15,0.7)'; X.beginPath(); X.arc(x,y,17,0,6.2832); X.fill();
+    X.strokeStyle=COL.gold; X.lineWidth=2; X.stroke();
+    X.fillStyle=COL.gold; X.font='500 15px sans-serif'; X.textAlign='center';
+    X.fillText(b.icon, x, y+6);
+    if (P.buffs[id]>1){
+      X.fillStyle=COL.silver; X.font='500 12px sans-serif';
+      X.fillText('×'+P.buffs[id], x+22, y+6);
+    }
+    bi++;
+  }
+
+  // 净域提示
+  X.textAlign='left'; X.fillStyle='rgba(157,225,203,0.75)'; X.font='500 12px sans-serif';
+  const FR = fieldR();
+  let cnt = 0;
+  for (const e of enemies) if(!e.dead&&e.team===0&&d2(e.x,e.y,AD.x,AD.y)<FR*FR) cnt++;
+  if (cnt>0) X.fillText('净域内有 '+cnt+' 敌兵 · 承伤 -15%', 24, CH-30);
+  if (blocked){
+    X.fillStyle=COL.gold; X.font='500 16px sans-serif'; X.textAlign='center';
+    X.fillText('前方围堵未清 · 击退敌兵才能继续推进', CW/2, 150);
+  }
+
+  X.restore();
+}
+function drawSlot(cx, cy, idx, active){
+  const s = SOULS[idx];
+  X.save();
+  X.fillStyle = active? 'rgba(240,185,60,0.22)' : 'rgba(22,18,15,0.75)';
+  X.beginPath(); X.arc(cx,cy,38,0,6.2832); X.fill();
+  X.strokeStyle = active? COL.gold : COL.mute; X.lineWidth = active?4:2;
+  X.stroke();
+  X.fillStyle = active? COL.gold : COL.silver;
+  X.font='500 20px sans-serif'; X.textAlign='center';
+  X.fillText(s.name[0], cx, cy-6);
+  X.font='500 11px sans-serif'; X.fillStyle=COL.silver;
+  X.fillText(s.name, cx, cy+14);
+  X.fillStyle=COL.mute; X.font='400 10px sans-serif';
+  X.fillText(s.type, cx, cy+28);
+  X.restore();
+}
+
+// ---------- 各界面 ----------
+function panel(x,y,w,h){
+  X.fillStyle='rgba(22,18,15,0.94)';
+  X.beginPath(); X.roundRect ? X.roundRect(x,y,w,h,16) : X.rect(x,y,w,h);
+  X.fill();
+  X.strokeStyle=COL.line; X.lineWidth=3; X.stroke();
+}
+function drawTitle(){
+  X.save();
+  X.fillStyle='rgba(14,12,9,0.9)'; X.fillRect(0,0,CW,CH);
+  X.textAlign='center';
+  X.fillStyle=COL.gold; X.font='500 60px sans-serif';
+  X.fillText('赵云与阿斗', CW/2, 230);
+  X.fillStyle=COL.silver; X.font='500 20px sans-serif';
+  X.fillText('长坂坡 · 武魂双持试玩版', CW/2, 275);
+  X.fillStyle=COL.mute; X.font='400 15px sans-serif';
+  X.fillText('键盘玩耍 · 单局 3-5 分钟', CW/2, 306);
+
+  const lines = [
+    'WASD / 方向键  移动（普攻自动）',
+    '空格  释放绝技（能量满时）',
+    'Shift / Tab / Q  切换主副武魂 · 切招 0.3 秒无敌',
+    'P  暂停      M  静音      U  解锁全部武魂',
+    '',
+    '核心规则：',
+    '· 阿斗周围 100px 是「净域」，域内敌兵减速 20%，但承伤也 -15%',
+    '——想打得动，就得把敌兵引出净域',
+    '· 兵器相克：长兵 → 短兵 → 弓弩 → 长兵（1.2 / 0.85）',
+    '· 护驾值归零会进入 3 秒夺回窗口，连按空格救回',
+    '· 打赢名将 BOSS = 解锁一把新武魂',
+    '· 前方每道「围堵」必须打穿才能继续推进',
+    '',
+    '试玩版说明：从第 5 级起手（正式版由养成铺垫）；',
+    '大贤（徐庶）按设计不造成伤害，靠拉扯回能与转化敌兵'
+  ];
+  X.fillStyle=COL.silver; X.font='400 17px sans-serif';
+  let y=390;
+  for (const l of lines){
+    if (l.startsWith('·')||l.startsWith('—')) X.fillStyle=COL.mute;
+    else if (l==='核心规则：') X.fillStyle=COL.gold;
+    else X.fillStyle=COL.silver;
+    X.fillText(l, CW/2, y); y+=34;
+  }
+  X.fillStyle=COL.gold; X.font='500 22px sans-serif';
+  X.fillText((Math.floor(T*2)%2===0)? '按 Enter 开始' : '', CW/2, 1050);
+  X.restore();
+}
+function drawSelect(){
+  X.save();
+  X.fillStyle='rgba(14,12,9,0.92)'; X.fillRect(0,0,CW,CH);
+  X.textAlign='center'; X.fillStyle=COL.gold; X.font='500 30px sans-serif';
+  X.fillText('装配武魂', CW/2, 110);
+  X.fillStyle=COL.silver; X.font='400 16px sans-serif';
+  const tipTxt = selectStep===0 ? '选择【主武魂】—— 按数字键' : '选择【副武魂】—— 按数字键';
+  X.fillText(tipTxt, CW/2, 150);
+
+  const cols=2, rows=4, bw=310, bh=140, gx=30, gy=22, ox=40, oy=200;
+  for (let i=0;i<8;i++){
+    const cx = ox + (i%cols)*(bw+gx), cy = oy + Math.floor(i/cols)*(bh+gy);
+    const s = SOULS[i], un = unlocked.indexOf(i)>=0;
+    const isMain = selectStep===0 && selMain===i;
+    const isSub  = selectStep===1 && selSub===i;
+    X.fillStyle = un? (isMain||isSub ? 'rgba(240,185,60,0.16)' : 'rgba(42,38,32,0.9)') : 'rgba(30,28,24,0.7)';
+    X.beginPath(); X.rect(cx,cy,bw,bh); X.fill();
+    X.strokeStyle = (isMain||isSub)? COL.gold : (un?COL.line:'#3A3A36');
+    X.lineWidth = (isMain||isSub)?3:2; X.stroke();
+    X.textAlign='left';
+    X.fillStyle = un? COL.gold : '#5A5852'; X.font='500 22px sans-serif';
+    X.fillText((i+1)+'. '+s.name+' · '+s.general, cx+16, cy+34);
+    X.fillStyle = un? COL.silver : '#5A5852'; X.font='400 14px sans-serif';
+    X.fillText(s.weapon+'  ['+s.type+']', cx+16, cy+58);
+    X.fillStyle = un? COL.mute : '#4A4842'; X.font='400 13px sans-serif';
+    X.fillText(s.tip, cx+16, cy+82);
+    X.fillStyle = un? '#888780' : '#4A4842'; X.font='400 12px sans-serif';
+    const mh = s.shape==='grab' ? '—' : (s.maxHit || s.pierce || 1);
+    X.fillText('绝技：'+s.ultName, cx+16, cy+104);
+    X.fillText('倍率 '+s.mul.toFixed(2)+' × 频率 '+s.rate.toFixed(1)+'/s × 多目标 '+mh, cx+16, cy+124);
+    if (!un){ X.fillStyle='#5A5852'; X.font='500 13px sans-serif';
+      X.fillText('未解锁（战胜 '+s.general+' 或按 U）', cx+16, cy+bh-12); }
+  }
+  X.textAlign='center'; X.fillStyle=COL.gold; X.font='500 20px sans-serif';
+  X.fillText( (selectStep===0?'主：':'副：') + (selectStep===0?SOULS[selMain].name:SOULS[selSub].name) +
+              '   按 Enter 出战', CW/2, 1060);
+  X.fillStyle=COL.mute; X.font='400 13px sans-serif';
+  X.fillText('战斗中也可随时用 Shift 在主副之间瞬切', CW/2, 1092);
+  X.restore();
+}
+function drawBuffPanel(){
+  X.save();
+  X.fillStyle='rgba(14,12,9,0.85)'; X.fillRect(0,0,CW,CH);
+  X.textAlign='center'; X.fillStyle=COL.gold; X.font='500 32px sans-serif';
+  X.fillText('武魂碎片集满 · 三选一', CW/2, 340);
+  X.fillStyle=COL.mute; X.font='400 15px sans-serif';
+  X.fillText('已强化阶层会递减：第2次 65%、第3次 40%、之后 25%', CW/2, 378);
+  const bw=200,bh=230,gx=30,ox=(CW-(bw*3+gx*2))/2, oy=450;
+  for (let i=0;i<buffChoices.length;i++){
+    const b=buffChoices[i], cx=ox+i*(bw+gx);
+    X.fillStyle='rgba(42,38,32,0.95)'; X.beginPath(); X.rect(cx,oy,bw,bh); X.fill();
+    X.strokeStyle=COL.line; X.lineWidth=3; X.stroke();
+    X.fillStyle=COL.gold; X.font='500 56px sans-serif';
+    X.fillText(b.icon, cx+bw/2, oy+110);
+    X.fillStyle=COL.silver; X.font='500 22px sans-serif';
+    X.fillText(b.name, cx+bw/2, oy+156);
+    X.fillStyle=COL.mute; X.font='400 14px sans-serif';
+    X.fillText(b.desc, cx+bw/2, oy+186);
+    if (P.buffs[b.id]){ X.fillStyle=COL.vermilion; X.font='500 14px sans-serif';
+      X.fillText('已有 '+P.buffs[b.id]+' 层', cx+bw/2, oy+212); }
+    X.fillStyle=COL.gold; X.font='500 16px sans-serif';
+    X.fillText('按 '+(i+1), cx+bw/2, oy+bh-12);
+  }
+  X.restore();
+}
+function drawPause(){
+  X.save();
+  X.fillStyle='rgba(14,12,9,0.72)'; X.fillRect(0,0,CW,CH);
+  X.textAlign='center'; X.fillStyle=COL.gold; X.font='500 40px sans-serif';
+  X.fillText('暂停', CW/2, CH/2-10);
+  X.fillStyle=COL.silver; X.font='400 16px sans-serif';
+  X.fillText('按 P 继续', CW/2, CH/2+34);
+  X.fillStyle=COL.mute; X.font='400 13px sans-serif';
+  X.fillText('WASD 移动 · 空格 绝技 · Shift 切武魂 · M 静音 · U 解锁全部', CW/2, CH/2+68);
+  X.restore();
+}
+
+function drawResult(win){
+  X.save();
+  X.fillStyle='rgba(14,12,9,0.9)'; X.fillRect(0,0,CW,CH);
+  panel(120, 380, CW-240, 420);
+  X.textAlign='center';
+  X.fillStyle = win? COL.gold : COL.danger; X.font='500 46px sans-serif';
+  X.fillText(win? '突围成功' : '阿斗被夺', CW/2, 470);
+  X.fillStyle=COL.silver; X.font='500 20px sans-serif';
+  X.fillText(win? ('第 '+stage.no+' 关 · '+stage.name) : '再来一次', CW/2, 520);
+  X.font='400 18px sans-serif'; X.fillStyle=COL.mute;
+  const rows = ['击杀 '+result.kills, '突围 '+result.distM+' m', '枪意等级 '+result.lv];
+  let y=580; for (const r of rows){ X.fillText(r, CW/2, y); y+=36; }
+  if (win && unlocked.length>2){}
+  X.fillStyle=COL.gold; X.font='500 22px sans-serif';
+  X.fillText(win? ((stageIdx>=STAGES.length-1)?'已通关全部试玩关卡':'按 Enter 进入下一关') : '按 Enter 重新开始',
+             CW/2, 760);
+  X.fillStyle=COL.mute; X.font='400 14px sans-serif';
+  X.fillText('按 R 回到武魂装配', CW/2, 800);
+  X.restore();
+}
+
+// ============================================================
+//  主循环
+// ============================================================
+let last = performance.now()/1000;
+function loop(now){
+  const nT = now/1000;
+  // dt 必须夹在 [0, 0.05]：时钟回跳/首帧差值为负时不能让 dt 变负，
+  // 否则所有基于时间戳的计时（攻击、技能 CD、无敌帧）会同时失效
+  let raw = Math.max(0, Math.min(0.05, nT - last)); last = nT;
+  DT = raw * timeScale;
+  T += DT;
+
+  // 全局键
+  if (once('m')) muted = !muted;
+  if (once('u') && (screen==='play'||screen==='title'||screen==='select')){
+    unlocked = [0,1,2,3,4,5,6,7];
+    addText2('已解锁全部 8 把武魂');
+  }
+  if (once('p') && (screen==='play'||screen==='buff')) paused = !paused;
+
+  if (screen==='title'){
+    if (once('Enter')) startGame();
+  }
+  else if (screen==='select'){
+    for (let i=0;i<8;i++){
+      if (once(String(i+1)) && unlocked.indexOf(i)>=0){
+        if (selectStep===0){ selMain=i; if (selSub===i) selSub = (i+1)%8; selectStep=1; }
+        else { if (i!==selMain){ selSub=i; selectStep=0; } }
+        sfx('swap');
+      }
+    }
+    if (once('Enter')){ P.main=selMain; P.sub=selSub; enterStage(0); }
+  }
+  else if (screen==='play'){
+    if (!paused){
+      updateStage(raw);
+      // 三选一：每集满 100 武魂碎片触发一次
+      if (netFragBank >= 100 && screen==='play'){
+        netFragBank -= 100; openBuffSelect();
+      }
+    }
+  }
+  else if (screen==='buff'){
+    for (let i=0;i<3;i++) if (once(String(i+1))) pickBuff(i);
+  }
+  else if (screen==='clear'){
+    if (once('Enter')){
+      if (stageIdx>=STAGES.length-1) { screen='title'; }
+      else enterStage(stageIdx+1);
+    }
+    if (once('r')) startGame();
+  }
+  else if (screen==='over'){
+    if (once('Enter')) startGame();
+    if (once('r')) startGame();
+  }
+
+  draw();
+  // 清理一次性按键状态
+  keysOnce = {};
+  requestAnimationFrame(loop);
+}
+
+function addText2(s){ addText(s, P.x, P.y-160, COL.gold, 24); }
+
+function updateStage(raw){
+  const dt = DT;
+  updatePlayer(dt);
+  blocked = updateWall();          // 围堵墙未打穿 -> 挡住推进
+  updateRecover(dt);
+  maintainEnemies(dt);
+  updateNetWalls();
+  updateEnemies(dt);
+  updateProjs(dt);
+  enemiesAttack(dt);
+
+  // 骑兵横冲
+  for (let i=riders.length-1;i>=0;i--){
+    const r = riders[i];
+    r.x += r.sp*dt; r.life -= dt;
+    for (const e of enemies){
+      if (e.dead||e.team!==0||r.hit.has(e)) continue;
+      if (d2(e.x,e.y,r.x,r.y) < 40*40){
+        r.hit.add(e); hurtEnemy(e, r.dmg, true, rr(0.95,1.05), r.x, r.y, 260);
+      }
+    }
+    if (r.life<=0 || r.x>CW+120) riders.splice(i,1);
+  }
+
+  // 特效与飘字
+  for (let i=vfx.length-1;i>=0;i--){ vfx[i].t += dt; if (vfx[i].t>=vfx[i].life) vfx.splice(i,1); }
+  for (let i=texts.length-1;i>=0;i--){ texts[i].t += DT; if (texts[i].t>=texts[i].life) texts.splice(i,1); }
+  if (ultFx.t>0) ultFx.t -= raw;
+  if (flashGuard>0) flashGuard -= raw;
+  if (shake>0) shake = Math.max(0, shake - raw*40);
+
+  // 名将在达成条件后出现
+  if (stage.boss && !enemies.some(e=>!e.dead&&e.cfg.boss) && kills>=stage.kills*0.55){
+    spawnEnemy(stage.boss, P.x+rr(-120,120), P.y-560);
+    addText(stage.intro, P.x, P.y-200, COL.danger, 26);
+  }
+  checkStage();
+}
+
+// 启动
+stage = STAGES[0];
+resetStage();
+paused = false;
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
