@@ -2,7 +2,7 @@
 
 纯前端单文件网页游戏。每个 `.html` 都是完整游戏，**零依赖、零构建**，双击就能玩。
 
-线上地址：部署后见仓库 About 或 Vercel 项目页。
+线上地址：**https://sixgames.vercel.app**　（Vercel 项目 `sixgames`，已与本仓库 main 分支关联，push 自动部署）
 
 ## 游戏列表
 
