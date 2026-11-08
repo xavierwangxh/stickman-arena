@@ -8,7 +8,7 @@
 
 | 游戏 | 文件 | 一句话 |
 |---|---|---|
-| 病毒上行 | `games/virus-ascension.html` | 从脚底伤口入侵到大脑，15 种突变对抗白细胞、巨噬细胞与血脑屏障 |
+| 病毒上行 | `games/virus-ascension.html` | 从脚底伤口蜿蜒入侵到大脑，15 种突变各有外形变化，对抗白细胞、巨噬细胞与血脑屏障 |
 | 火柴人大战 | `games/stickman-arena.html` | 16 把冷兵器与枪械、18 关战役 + 6 场 BOSS、4 兵种、生化与无尽模式、弹道物理、护甲系统 |
 | 火柴人枪枪大战 | `games/stickman-shooter.html` | 横版射击 + 剧情 + 多武器 |
 | 坦克大战 | `games/tank-battle.html` | 经典保卫基地，5 种玩家坦克 |
