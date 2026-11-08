@@ -183,7 +183,8 @@ function reset(){
   P = newPlayer();
   P.x = corridor(P.y).cx;              // 从通道正中开始
   enemies = []; bullets = []; ebullets = []; parts = []; floats = []; waves = [];
-  boss = null; core = {x: CW/2, y: 900, r: 34, hp: 100, t: 0};
+  boss = null; core = {x: 0, y: 900, r: 34, hp: 100, t: 0};
+  core.x = corridor(900).cx;
   spawnT = 1.0; waveT = 0; alertV = 0; kills = 0; runTime = 0; lastZone = zoneIdx(P.y);
   camY = clamp(P.y - CH*0.66, 0, WORLD_H - CH);
   camX = clamp(P.x - CW/2, 0, WORLD_W - CW);
@@ -586,7 +587,7 @@ function bulletTick(dt){
 // ---------------- BOSS：血脑屏障 ----------------
 function spawnBossIfNeeded(){
   if (!boss && P.y < 4600){
-    boss = {x: CW/2, y: 3150, dead: false, t: 0, arm: 0, nodes: [], hitT: 0};
+    boss = {x: corridor(3150).cx, y: 3150, dead: false, t: 0, arm: 0, nodes: [], hitT: 0};
     const c = corridor(3380);
     for (let i=0;i<3;i++){
       boss.nodes.push({x: c.cx + (i-1)*c.half*0.58, y: 3380, r: 26, hp: 130, hpMax: 130, dead: false, hitT: 0, cd: 1.6 + i*1.2});
