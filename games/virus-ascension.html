@@ -80,14 +80,23 @@ const ZONES = [
   {n:'足底伤口', e:'PLANTAR WOUND',      top:24000, h:4000, c1:'#421512', c2:'#1F0A08', wall:'#60261F'}
 ];
 const WORLD_H = 28000;
+const WORLD_W = 2600;        // 世界比画面宽：通道可以真的左右拐，镜头横移跟拍
 function zoneIdx(y){ for (let i=0;i<ZONES.length;i++){ if (y >= ZONES[i].top) return i; } return 0; }
 function zoneAt(y){ return ZONES[zoneIdx(y)]; }
 
-// 通道：左右组织壁，宽度随高度略收窄（越靠近大脑越窄）
+// 通道：不再是轻微摆动，而是「折线 + smoothstep」做出来的真拐弯
+// 每 820px 一个转折节点，节点横向在 ±760 内游走，转弯处按 smoothstep 圆滑过渡
+const TURN_STEP = 1500, TURN_AMP = 500;   // 每 1500px 一个转折，横向摆 ±500（最大坡度约 45°，玩家跟得上）
+const mod = (a,b) => ((a % b) + b) % b;
+function segRand(i){ const s = Math.sin(i*127.1 + 3.7) * 43758.5453; return s - Math.floor(s); }
+function nodeX(i){ return WORLD_W/2 + (segRand(i)*2 - 1) * TURN_AMP; }
 function corridor(y){
   const k = clamp(1 - y / WORLD_H, 0, 1);          // 0 脚底 → 1 大脑
-  const cx = CW/2 + Math.sin(y*0.0016)*78 + Math.sin(y*0.00053+1.7)*112;
-  const half = lerp(330, 250, k) + Math.sin(y*0.0029+0.5)*26;
+  const t = y / TURN_STEP;
+  const i = Math.floor(t), f = t - i;
+  const sm = f*f*(3-2*f);                          // 圆滑转弯，不生硬
+  const cx = lerp(nodeX(i), nodeX(i+1), sm);
+  const half = lerp(330, 252, k) + Math.sin(y*0.0031 + 0.5)*22;
   return {cx, half};
 }
 
@@ -143,7 +152,7 @@ const SPAWN_TABLE = [
 // ---------------- 状态 ----------------
 let screen = 'title';           // title | play | mutation | pause | over | win
 let T = 0, DT = 0, lastT = 0;
-let camY = 0, shake = 0, flash = 0;
+let camY = 0, camX = 0, shake = 0, flash = 0;
 let hint = '', hintT = 0;
 let strain = STRAINS[0];
 
@@ -158,7 +167,7 @@ let mutChoices = [], mutTaken = {};
 
 function newPlayer(){
   return {
-    x: CW/2, y: WORLD_H - 260, vx:0, vy:0, r: 13,
+    x: 0, y: WORLD_H - 260, vx:0, vy:0, r: 13,
     hp: strain.hp, maxHp: strain.hp,
     spd: strain.spd, spdMul: 1,
     dmg: strain.dmg, dmgMul: 1, rate: strain.rate, rateMul: 1, bspd: 660,
@@ -172,10 +181,12 @@ function newPlayer(){
 
 function reset(){
   P = newPlayer();
+  P.x = corridor(P.y).cx;              // 从通道正中开始
   enemies = []; bullets = []; ebullets = []; parts = []; floats = []; waves = [];
   boss = null; core = {x: CW/2, y: 900, r: 34, hp: 100, t: 0};
   spawnT = 1.0; waveT = 0; alertV = 0; kills = 0; runTime = 0; lastZone = zoneIdx(P.y);
   camY = clamp(P.y - CH*0.66, 0, WORLD_H - CH);
+  camX = clamp(P.x - CW/2, 0, WORLD_W - CW);
   mutChoices = []; mutTaken = {};
   hint = '刺穿皮肤，向上。'; hintT = 3.5;
   screen = 'play';
@@ -399,7 +410,7 @@ function playerTick(dt){
   P.cd -= dt;
   if (mouse.down && P.cd <= 0){
     P.cd = Math.max(0.055, P.rate * P.rateMul);
-    const ang = Math.atan2((mouse.y + camY) - P.y, mouse.x - P.x);
+    const ang = Math.atan2((mouse.y + camY) - P.y, (mouse.x + camX) - P.x);
     const n = P.shots;
     for (let i=0;i<n;i++){
       const off = (i - (n-1)/2) * 0.085;
@@ -684,6 +695,9 @@ function update(dt){
   // 摄像机：玩家在下方 66% 处，前方留出视野
   const want = clamp(P.y - CH*0.66, 0, WORLD_H - CH);
   camY = lerp(camY, want, Math.min(1, dt*7));
+  // 横向跟拍：留一点滞后，转弯时才有"甩过去"的感觉
+  const wantX = clamp(P.x - CW/2, 0, WORLD_W - CW);
+  camX = lerp(camX, wantX, Math.min(1, dt*4.2));
 
   if (shake > 0) shake = Math.max(0, shake - dt*32);
   if (flash > 0) flash = Math.max(0, flash - dt*2.4);
@@ -691,32 +705,32 @@ function update(dt){
 }
 
 // ---------------- 绘制：世界 ----------------
+// 约定：世界坐标 = 逻辑坐标。draw() 里统一 translate(-camX,-camY)，
+// 所以这里的绘制函数一律直接用世界坐标，不再各自减镜头。
 function drawBackground(){
   const z = zoneAt(camY + CH/2);
   const g = X.createLinearGradient(0,0,0,CH);
   g.addColorStop(0, z.c1); g.addColorStop(1, z.c2);
   X.fillStyle = g; X.fillRect(0,0,CW,CH);
 
-  // 组织纤维（确定性，不闪）
-  X.save();
+  // 组织纤维：随镜头做 0.12 倍横向视差
+  X.strokeStyle = 'rgba(255,255,255,0.028)'; X.lineWidth = 1.4;
   for (let i=0;i<26;i++){
-    const seed = i*137.5;
-    const yy = ((seed + camY*0.35) % (CH+220)) - 110;
-    const xx = ((Math.sin(i*12.9898)*43758.5453) % 1 + 1) % 1 * CW;
+    const yy = mod(i*137.5 + camY*0.35, CH+220) - 110;
+    const base = mod(Math.sin(i*12.9898)*43758.5453, 1);
+    const xx = mod(base*(CW+240) - camX*0.12, CW+240) - 120;
     const len = 120 + (i%5)*60;
-    X.strokeStyle = 'rgba(255,255,255,0.028)';
-    X.lineWidth = 1.4;
     X.beginPath();
-    X.moveTo(xx - len/2, yy);
-    X.quadraticCurveTo(xx, yy + Math.sin(i + T*0.2)*22, xx + len/2, yy + 12);
+    X.moveTo(xx-len/2, yy);
+    X.quadraticCurveTo(xx, yy + Math.sin(i + T*0.2)*22, xx+len/2, yy+12);
     X.stroke();
   }
-  X.restore();
 
   // 远景漂浮细胞
   for (let i=0;i<14;i++){
-    const yy = ((i*211.7 + camY*0.55 + T*8) % (CH+160)) - 80;
-    const xx = ((Math.sin(i*78.233)*12345.6789) % 1 + 1) % 1 * CW;
+    const yy = mod(i*211.7 + camY*0.55 + T*8, CH+160) - 80;
+    const base = mod(Math.sin(i*78.233)*12345.6789, 1);
+    const xx = mod(base*(CW+200) - camX*0.2, CW+200) - 100;
     X.globalAlpha = 0.14;
     X.fillStyle = i%3 ? '#8E2233' : '#B33A46';
     X.beginPath(); X.arc(xx, yy, 9 + (i%4)*3, 0, TAU); X.fill();
@@ -726,102 +740,104 @@ function drawBackground(){
 
 function drawWalls(){
   const z = zoneAt(camY + CH/2);
-  const y0 = camY - 160, y1 = camY + CH + 160;
+  const y0 = camY - 200, y1 = camY + CH + 200;
+  const LX = camX - 160, RX = camX + CW + 160;
   for (const side of [-1, 1]){
-    X.beginPath();
-    let first = true;
-    for (let y=y0; y<=y1; y+=36){
+    const pts = [];
+    for (let y=y0; y<=y1; y+=26){
       const c = corridor(y);
       const wob = Math.sin(y*0.012 + side)*9 + Math.sin(y*0.0043)*16;
-      const x = c.cx + side*(c.half + wob);
-      const sy = y - camY;
-      if (first){ X.moveTo(x, sy); first = false; } else X.lineTo(x, sy);
+      pts.push([c.cx + side*(c.half + wob), y]);
     }
-    if (side < 0){ X.lineTo(-40, y1-camY); X.lineTo(-40, y0-camY); }
-    else { X.lineTo(CW+40, y1-camY); X.lineTo(CW+40, y0-camY); }
-    X.closePath();
-    const g = X.createLinearGradient(0,0, side<0?0:CW, 0);
-    g.addColorStop(0, 'rgba(0,0,0,0.55)');
-    g.addColorStop(1, 'rgba(0,0,0,0.18)');
+    X.beginPath();
+    X.moveTo(pts[0][0], pts[0][1]);
+    for (let i=1;i<pts.length;i++) X.lineTo(pts[i][0], pts[i][1]);
+    const edgeX = side < 0 ? LX : RX;
+    X.lineTo(edgeX, y1); X.lineTo(edgeX, y0); X.closePath();
     X.fillStyle = z.wall; X.fill();
+    const g = X.createLinearGradient(edgeX, 0, camX + CW*(side<0?0.4:0.6), 0);
+    g.addColorStop(0,'rgba(0,0,0,0.58)');
+    g.addColorStop(1,'rgba(0,0,0,0.05)');
     X.fillStyle = g; X.fill();
     // 膜边缘高光
     X.beginPath();
-    first = true;
-    for (let y=y0; y<=y1; y+=36){
-      const c = corridor(y);
-      const wob = Math.sin(y*0.012 + side)*9 + Math.sin(y*0.0043)*16;
-      const x = c.cx + side*(c.half + wob);
-      const sy = y - camY;
-      if (first){ X.moveTo(x, sy); first = false; } else X.lineTo(x, sy);
-    }
-    X.strokeStyle = 'rgba(255,170,190,0.20)'; X.lineWidth = 2.5; X.stroke();
+    X.moveTo(pts[0][0], pts[0][1]);
+    for (let i=1;i<pts.length;i++) X.lineTo(pts[i][0], pts[i][1]);
+    X.strokeStyle = 'rgba(255,170,190,0.22)'; X.lineWidth = 2.5; X.stroke();
   }
 }
 
 function drawWave(w){
-  const sy = w.y - camY;
-  const g = X.createLinearGradient(0, sy-120, 0, sy+30);
-  g.addColorStop(0, 'rgba(255,90,60,0)');
-  g.addColorStop(0.65, 'rgba(255,110,60,0.22)');
-  g.addColorStop(1, 'rgba(255,180,90,0.5)');
+  const top = w.y - 120;
+  const g = X.createLinearGradient(0, top, 0, w.y + 30);
+  g.addColorStop(0,'rgba(255,90,60,0)');
+  g.addColorStop(0.65,'rgba(255,110,60,0.22)');
+  g.addColorStop(1,'rgba(255,180,90,0.5)');
   X.fillStyle = g;
-  X.fillRect(0, sy-120, CW, 150);
+  X.fillRect(camX-60, top, CW+120, 150);
   X.strokeStyle = 'rgba(255,190,120,0.55)'; X.lineWidth = 3;
   X.beginPath();
-  for (let x=0;x<=CW;x+=32){
-    const yy = sy + Math.sin(x*0.02 + T*6)*7;
-    x===0 ? X.moveTo(x,yy) : X.lineTo(x,yy);
+  let first = true;
+  for (let x=camX-60; x<=camX+CW+60; x+=32){
+    const yy = w.y + Math.sin(x*0.02 + T*6)*7;
+    if (first){ X.moveTo(x,yy); first = false; } else X.lineTo(x,yy);
   }
   X.stroke();
 }
 
-// ---------------- 绘制：实体 ----------------
-function drawPlayer(){
-  const sx = P.x, sy = P.y - camY;
-  X.save();
-  X.translate(sx, sy);
-
-  // 外发光
-  const gl = X.createRadialGradient(0,0,2,0,0,46);
-  gl.addColorStop(0,'rgba(123,247,196,0.30)');
-  gl.addColorStop(1,'rgba(123,247,196,0)');
-  X.fillStyle = gl;
-  X.beginPath(); X.arc(0,0,46,0,TAU); X.fill();
-
-  // 膜（不规则抖动）
-  X.beginPath();
-  const N = 26;
-  for (let i=0;i<=N;i++){
-    const a = i/N*TAU;
-    const rad = P.r * (1 + 0.13*Math.sin(a*5 + T*3.4) + 0.07*Math.sin(a*3 - T*2.1));
-    const x = Math.cos(a)*rad, y = Math.sin(a)*rad;
-    i===0 ? X.moveTo(x,y) : X.lineTo(x,y);
-  }
-  X.closePath();
-  X.fillStyle = P.invuln > 0 && Math.floor(T*20)%2 ? 'rgba(255,255,255,0.9)' : C.player;
-  X.fill();
-  X.strokeStyle = 'rgba(223,255,242,0.75)'; X.lineWidth = 1.6; X.stroke();
-
-  // 刺突
-  X.strokeStyle = C.spike; X.lineWidth = 2;
-  for (let i=0;i<9;i++){
-    const a = i/9*TAU + T*0.6;
-    const r0 = P.r + 1, r1 = P.r + 9 + Math.sin(T*5 + i)*2.2;
+function drawCore(){
+  if (!core) return;
+  if (core.y < camY - 220 || core.y > camY + CH + 220) return;
+  const cx = core.x, cy = core.y;
+  const pulse = 0.85 + 0.15*Math.sin(T*2.6);
+  const g = X.createRadialGradient(cx, cy, 4, cx, cy, 90*pulse);
+  g.addColorStop(0,'rgba(255,240,180,0.9)');
+  g.addColorStop(0.35,'rgba(240,185,60,0.35)');
+  g.addColorStop(1,'rgba(240,185,60,0)');
+  X.fillStyle = g;
+  X.beginPath(); X.arc(cx, cy, 90*pulse, 0, TAU); X.fill();
+  X.strokeStyle = 'rgba(255,240,180,0.6)'; X.lineWidth = 2;
+  for (let i=0;i<3;i++){
     X.beginPath();
-    X.moveTo(Math.cos(a)*r0, Math.sin(a)*r0);
-    X.lineTo(Math.cos(a)*r1, Math.sin(a)*r1);
+    X.arc(cx, cy, 26 + i*10 + Math.sin(T*3+i)*3, T*0.6 + i, T*0.6 + i + 4.4);
     X.stroke();
   }
-  // 核心
-  X.fillStyle = C.core;
-  X.beginPath(); X.arc(0,0,P.r*0.42 + Math.sin(T*4)*1.2,0,TAU); X.fill();
-  X.restore();
+  X.fillStyle = '#FFF6D8';
+  X.beginPath(); X.arc(cx, cy, 13, 0, TAU); X.fill();
+  X.fillStyle = 'rgba(10,8,6,0.8)';
+  X.font = '600 13px sans-serif'; X.textAlign = 'center';
+  X.fillText('神经元核', cx, cy - 46);
+}
+
+function drawParticles(){
+  for (const p of parts){
+    const k = 1 - p.t/p.life;
+    if (p.ring){
+      X.globalAlpha = 0.28*k;
+      X.strokeStyle = p.c; X.lineWidth = 3;
+      X.beginPath(); X.arc(p.x, p.y, p.r*(1.15-k*0.4), 0, TAU); X.stroke();
+    } else {
+      X.globalAlpha = k;
+      X.fillStyle = p.c;
+      X.beginPath(); X.arc(p.x, p.y, p.r*k, 0, TAU); X.fill();
+    }
+  }
+  X.globalAlpha = 1;
+  X.textAlign = 'center';
+  for (const f of floats){
+    const k = 1 - f.t/f.life;
+    X.globalAlpha = k;
+    X.font = (f.small?'500 13px':'600 16px') + ' sans-serif';
+    X.fillStyle = f.c;
+    X.fillText(f.txt, f.x, f.y);
+  }
+  X.globalAlpha = 1;
 }
 
 function drawEnemy(e){
-  const sx = e.x, sy = e.y - camY;
-  if (sy < -160 || sy > CH + 160) return;
+  const sx = e.x, sy = e.y;
+  if (sy < camY - 180 || sy > camY + CH + 180) return;
+  if (sx < camX - 240 || sx > camX + CW + 240) return;
   const flash = e.hitT > 0;
   X.save(); X.translate(sx, sy);
 
@@ -834,14 +850,12 @@ function drawEnemy(e){
       i===0 ? X.moveTo(Math.cos(a)*rad, Math.sin(a)*rad) : X.lineTo(Math.cos(a)*rad, Math.sin(a)*rad);
     }
     X.closePath(); X.fill();
-    // 分叶核
     X.fillStyle = C.wbcCore;
     for (let i=0;i<3;i++){
       const a = i/3*TAU + e.t0*0.6;
       X.beginPath(); X.arc(Math.cos(a)*4.5, Math.sin(a)*4.5, 4.2, 0, TAU); X.fill();
     }
   } else if (e.t === 'macro'){
-    // 伪足
     X.fillStyle = flash ? '#FFFFFF' : 'rgba(232,178,106,0.85)';
     X.beginPath();
     for (let i=0;i<=20;i++){
@@ -853,7 +867,7 @@ function drawEnemy(e){
     X.strokeStyle = 'rgba(255,220,170,0.5)'; X.lineWidth = 2; X.stroke();
     X.fillStyle = C.macroCore;
     X.beginPath(); X.arc(0,0,e.r*0.45,0,TAU); X.fill();
-    if (e.state === 1){                       // 扑击预警
+    if (e.state === 1){
       X.strokeStyle = 'rgba(255,120,90,'+(0.4+0.4*Math.sin(T*18))+')';
       X.lineWidth = 3;
       X.beginPath(); X.arc(0,0,e.r+12,0,TAU); X.stroke();
@@ -896,7 +910,6 @@ function drawEnemy(e){
     X.beginPath(); X.arc(-e.r*0.35,-e.r*0.35,e.r*0.3,0,TAU); X.fill();
   }
 
-  // 血条（受伤才显示）
   if (!flash && e.hp < e.hpMax && e.t !== 'rbc'){
     const w = Math.max(22, e.r*2);
     X.fillStyle = 'rgba(0,0,0,0.55)'; X.fillRect(-w/2, -e.r-12, w, 3.5);
@@ -907,10 +920,9 @@ function drawEnemy(e){
 
 function drawBoss(){
   if (!boss || boss.dead) return;
-  const bx = boss.x, by = boss.y - camY;
-  if (by < -500 || by > CH + 500) return;
+  const bx = boss.x, by = boss.y;
+  if (by < camY - 700 || by > camY + CH + 700) return;
 
-  // 旋转伪足
   const L = 560;
   const ax2 = bx + Math.cos(boss.arm)*L, ay2 = by + Math.sin(boss.arm)*L;
   X.strokeStyle = 'rgba(255,150,220,0.35)';
@@ -920,7 +932,6 @@ function drawBoss(){
   X.lineWidth = 4;
   X.beginPath(); X.moveTo(bx,by); X.lineTo(ax2,ay2); X.stroke();
 
-  // 星形胶质细胞本体
   const g = X.createRadialGradient(bx,by,10,bx,by,120);
   g.addColorStop(0,'rgba(255,190,235,0.95)');
   g.addColorStop(0.5,'rgba(190,110,200,0.65)');
@@ -939,10 +950,9 @@ function drawBoss(){
   X.fillStyle = 'rgba(90,30,90,0.85)';
   X.beginPath(); X.arc(bx,by,22,0,TAU); X.fill();
 
-  // 三处紧密连接
   for (const nd of boss.nodes){
     if (nd.dead) continue;
-    const nx = nd.x, ny = nd.y - camY;
+    const nx = nd.x, ny = nd.y;
     const pulse = 0.6 + 0.4*Math.sin(T*4 + nd.x);
     X.fillStyle = 'rgba(255,120,210,'+(0.18*pulse)+')';
     X.beginPath(); X.arc(nx,ny,nd.r*2.4,0,TAU); X.fill();
@@ -956,79 +966,29 @@ function drawBoss(){
     }
     X.closePath(); X.fill();
     X.strokeStyle = 'rgba(255,200,240,0.9)'; X.lineWidth = 2; X.stroke();
-    // 血条
     const w = 62;
     X.fillStyle = 'rgba(0,0,0,0.6)'; X.fillRect(nx-w/2, ny-nd.r-16, w, 5);
     X.fillStyle = '#FF7BD6'; X.fillRect(nx-w/2, ny-nd.r-16, w*clamp(nd.hp/nd.hpMax,0,1), 5);
   }
 
-  // 屏障膜
   X.strokeStyle = 'rgba(255,140,220,0.28)';
   X.lineWidth = 3;
   for (let i=0;i<3;i++){
     X.beginPath();
-    const y0 = 3430 - camY + i*9;
-    for (let x=0;x<=CW;x+=40){
+    const y0 = 3430 + i*9;
+    let first = true;
+    for (let x=camX-60; x<=camX+CW+60; x+=40){
       const yy = y0 + Math.sin(x*0.012 + T*1.6 + i)*6;
-      x===0 ? X.moveTo(x,yy) : X.lineTo(x,yy);
+      if (first){ X.moveTo(x,yy); first = false; } else X.lineTo(x,yy);
     }
     X.stroke();
   }
-}
-
-function drawCore(){
-  if (!core) return;
-  const sy = core.y - camY;
-  if (sy < -200 || sy > CH + 200) return;
-  const pulse = 0.85 + 0.15*Math.sin(T*2.6);
-  const g = X.createRadialGradient(core.x, sy, 4, core.x, sy, 90*pulse);
-  g.addColorStop(0,'rgba(255,240,180,0.9)');
-  g.addColorStop(0.35,'rgba(240,185,60,0.35)');
-  g.addColorStop(1,'rgba(240,185,60,0)');
-  X.fillStyle = g;
-  X.beginPath(); X.arc(core.x, sy, 90*pulse, 0, TAU); X.fill();
-  X.strokeStyle = 'rgba(255,240,180,0.6)'; X.lineWidth = 2;
-  for (let i=0;i<3;i++){
-    X.beginPath();
-    X.arc(core.x, sy, 26 + i*10 + Math.sin(T*3+i)*3, T*0.6 + i, T*0.6 + i + 4.4);
-    X.stroke();
-  }
-  X.fillStyle = '#FFF6D8';
-  X.beginPath(); X.arc(core.x, sy, 13, 0, TAU); X.fill();
-  X.fillStyle = 'rgba(10,8,6,0.8)';
-  X.font = '600 13px sans-serif'; X.textAlign = 'center';
-  X.fillText('神经元核', core.x, sy - 46);
-}
-
-function drawParticles(){
-  for (const p of parts){
-    const k = 1 - p.t/p.life;
-    if (p.ring){
-      X.globalAlpha = 0.28*k;
-      X.strokeStyle = p.c; X.lineWidth = 3;
-      X.beginPath(); X.arc(p.x, p.y-camY, p.r*(1.15-k*0.4), 0, TAU); X.stroke();
-    } else {
-      X.globalAlpha = k;
-      X.fillStyle = p.c;
-      X.beginPath(); X.arc(p.x, p.y-camY, p.r*k, 0, TAU); X.fill();
-    }
-  }
-  X.globalAlpha = 1;
-  X.textAlign = 'center';
-  for (const f of floats){
-    const k = 1 - f.t/f.life;
-    X.globalAlpha = k;
-    X.font = (f.small?'500 13px':'600 16px') + ' sans-serif';
-    X.fillStyle = f.c;
-    X.fillText(f.txt, f.x, f.y - camY);
-  }
-  X.globalAlpha = 1;
 }
 
 function drawBullets(){
   for (const b of bullets){
     const a = Math.atan2(b.vy, b.vx);
-    X.save(); X.translate(b.x, b.y-camY); X.rotate(a);
+    X.save(); X.translate(b.x, b.y); X.rotate(a);
     X.fillStyle = 'rgba(123,247,196,0.28)';
     X.beginPath(); X.ellipse(-10,0,14,4,0,0,TAU); X.fill();
     X.fillStyle = C.spike;
@@ -1039,10 +999,192 @@ function drawBullets(){
   }
   for (const b of ebullets){
     X.fillStyle = 'rgba(242,193,78,0.25)';
-    X.beginPath(); X.arc(b.x, b.y-camY, b.r*2.2, 0, TAU); X.fill();
+    X.beginPath(); X.arc(b.x, b.y, b.r*2.2, 0, TAU); X.fill();
     X.fillStyle = b.col || C.anti;
-    X.beginPath(); X.arc(b.x, b.y-camY, b.r, 0, TAU); X.fill();
+    X.beginPath(); X.arc(b.x, b.y, b.r, 0, TAU); X.fill();
   }
+}
+
+// ---------------- 玩家：突变会改变外形 ----------------
+function drawPlayer(){
+  const px = P.x, py = P.y;
+  const stk = k => mutTaken[k] || 0;
+  const R0 = P.r + Math.min(4.5, P.level * 0.22);   // 等级让本体略微长大（判定半径不变）
+
+  // 复制加速：移动时拖残影，静止时身旁浮着待分裂的子代
+  const repl = stk('repl');
+  if (repl){
+    const moving = Math.abs(P.vx) + Math.abs(P.vy) > 30;
+    for (let i=1;i<=repl;i++){
+      const ox = moving ? -P.vx*0.018*i : Math.cos(T*1.4 + i*1.7)*4;
+      const oy = moving ? -P.vy*0.018*i : -7 - i*2 + Math.sin(T*1.4 + i*1.7)*2;
+      X.globalAlpha = moving ? (0.16 - i*0.03) : 0.26;
+      X.fillStyle = C.player;
+      X.beginPath(); X.arc(px+ox, py+oy, R0*(1 - i*0.10), 0, TAU); X.fill();
+      X.globalAlpha = 1;
+      X.strokeStyle = 'rgba(223,255,242,0.30)'; X.lineWidth = 1;
+      X.beginPath(); X.arc(px+ox, py+oy, R0*(1 - i*0.10) + 2, 0, TAU); X.stroke();
+    }
+  }
+
+  // 荚膜增厚：外面多一层半透明荚膜
+  const cap = stk('cap');
+  if (cap){
+    const R = R0 + 7 + cap*2.4 + Math.sin(T*2.2)*1.3;
+    const g = X.createRadialGradient(px, py, R*0.55, px, py, R+7);
+    g.addColorStop(0,'rgba(168,200,255,0)');
+    g.addColorStop(0.75,'rgba(168,200,255,0.16)');
+    g.addColorStop(1,'rgba(168,200,255,0)');
+    X.fillStyle = g; X.beginPath(); X.arc(px, py, R+7, 0, TAU); X.fill();
+    X.strokeStyle = 'rgba(198,222,255,0.42)'; X.lineWidth = 1.4;
+    X.beginPath(); X.arc(px, py, R, 0, TAU); X.stroke();
+  }
+
+  // 溶酶体抗性：三片装甲弧
+  const lyso = stk('lyso');
+  for (let i=0;i<lyso;i++){
+    for (let k=0;k<3;k++){
+      const a0 = k/3*TAU + 0.5 + Math.sin(T*0.6)*0.05;
+      X.strokeStyle = 'rgba(197,139,232,0.5)'; X.lineWidth = 3;
+      X.beginPath(); X.arc(px, py, R0+4+i*1.6, a0, a0+0.72); X.stroke();
+    }
+  }
+
+  // 内吞体 / 双株 / 细胞融合：环绕的小体
+  const endo = stk('endo'), split = stk('split'), fuse = stk('fuse');
+  for (let i=0;i<endo;i++){
+    const a = T*2.6 + i/Math.max(1,endo)*TAU;
+    X.fillStyle = 'rgba(232,178,106,0.9)';
+    X.beginPath(); X.arc(px+Math.cos(a)*(R0+11), py+Math.sin(a)*(R0+11), 3 + Math.sin(T*5+i)*0.6, 0, TAU); X.fill();
+  }
+  for (let i=0;i<split;i++){
+    const a = -T*1.7 + i/Math.max(1,split)*TAU;
+    const bx = px+Math.cos(a)*(R0+22), by = py+Math.sin(a)*(R0+22);
+    X.fillStyle = 'rgba(155,255,216,0.85)';
+    X.beginPath(); X.arc(bx, by, 4.6, 0, TAU); X.fill();
+    X.strokeStyle = 'rgba(223,255,242,0.5)'; X.lineWidth = 1;
+    X.beginPath(); X.arc(bx, by, 7.5, 0, TAU); X.stroke();
+  }
+  for (let i=0;i<fuse;i++){
+    const a = T*1.1 + i/Math.max(1,fuse)*TAU + 1.2;
+    X.fillStyle = 'rgba(214,69,69,0.85)';
+    X.beginPath(); X.arc(px+Math.cos(a)*(R0+16), py+Math.sin(a)*(R0+16), 2.8, 0, TAU); X.fill();
+  }
+
+  // 本体：受击闪白；抗原伪装让膜半透明
+  const mask = stk('mask');
+  const alpha = mask ? 0.62 + 0.22*Math.sin(T*3.4) : 1;
+  if (mask){
+    // 抗原伪装：膜外的折射光环，静止也看得出"壳在晃"
+    X.strokeStyle = 'rgba(200,220,255,0.22)'; X.lineWidth = 1;
+    X.beginPath(); X.arc(px, py, R0 + 9 + Math.sin(T*2.4)*1.8, 0, TAU); X.stroke();
+    X.strokeStyle = 'rgba(200,220,255,0.12)'; X.lineWidth = 1;
+    X.beginPath(); X.arc(px, py, R0 + 14 + Math.sin(T*2.4+1.2)*2.4, 0, TAU); X.stroke();
+  }
+  X.globalAlpha = alpha;
+  const white = P.invuln > 0 && Math.floor(T*20)%2;
+  X.beginPath();
+  const N = 28;
+  for (let i=0;i<=N;i++){
+    const a = i/N*TAU;
+    const rad = R0*(1 + 0.12*Math.sin(a*5 + T*3.2) + 0.06*Math.sin(a*3 - T*2.1));
+    const xx = px+Math.cos(a)*rad, yy = py+Math.sin(a)*rad;
+    i===0 ? X.moveTo(xx,yy) : X.lineTo(xx,yy);
+  }
+  X.closePath();
+  X.fillStyle = white ? 'rgba(255,255,255,0.95)' : C.player;
+  X.fill();
+  X.strokeStyle = 'rgba(223,255,242,0.75)'; X.lineWidth = 1.6; X.stroke();
+  X.globalAlpha = 1;
+
+  // 裂解爆发：体内橙红裂纹
+  const lyse = stk('lyse');
+  if (lyse){
+    X.strokeStyle = 'rgba(255,120,90,' + (0.45 + 0.25*Math.sin(T*6)) + ')';
+    X.lineWidth = 1.6;
+    for (let i=0;i<lyse+1;i++){
+      const a = i*2.1 + 0.6;
+      X.beginPath();
+      X.moveTo(px + Math.cos(a)*2, py + Math.sin(a)*2);
+      X.lineTo(px + Math.cos(a+0.4)*R0*0.7, py + Math.sin(a+0.4)*R0*0.7);
+      X.lineTo(px + Math.cos(a)*R0*0.95, py + Math.sin(a)*R0*0.95);
+      X.stroke();
+    }
+  }
+
+  // 刺突：数量随突变变多、变长；穿孔素让尖端带上小环
+  const spike = stk('spike'), pore = stk('pore');
+  const nSpike = 9 + spike*3;
+  X.strokeStyle = C.spike; X.lineWidth = 2;
+  for (let i=0;i<nSpike;i++){
+    const a = i/nSpike*TAU + T*0.6;
+    const r0 = R0 + 1, r1 = R0 + 9 + spike*2.4 + Math.sin(T*5 + i)*2.2;
+    X.beginPath();
+    X.moveTo(px+Math.cos(a)*r0, py+Math.sin(a)*r0);
+    X.lineTo(px+Math.cos(a)*r1, py+Math.sin(a)*r1);
+    X.stroke();
+    if (pore){
+      X.fillStyle = 'rgba(242,193,78,0.85)';
+      X.beginPath(); X.arc(px+Math.cos(a)*r1, py+Math.sin(a)*r1, 1.8, 0, TAU); X.fill();
+    }
+  }
+
+  // 鞭毛强化：身后飘的鞭毛
+  const fla = stk('fla');
+  for (let k=0;k<fla;k++){
+    const baseA = Math.PI/2 + (k - (fla-1)/2)*0.5;
+    X.strokeStyle = 'rgba(123,247,196,' + (0.55 - k*0.08) + ')';
+    X.lineWidth = 2.4;
+    X.beginPath();
+    X.moveTo(px+Math.cos(baseA)*R0*0.7, py+Math.sin(baseA)*R0*0.7);
+    X.quadraticCurveTo(
+      px+Math.cos(baseA)*(R0+16), py+Math.sin(baseA)*(R0+16),
+      px+Math.cos(baseA+0.5)*(R0+30) + Math.sin(T*6+k)*7, py+Math.sin(baseA+0.5)*(R0+30)
+    );
+    X.stroke();
+  }
+
+  // 神经嗜性：向上伸的细触须
+  const neuro = stk('neuro');
+  for (let k=0;k<neuro*2;k++){
+    const baseA = -Math.PI/2 + (k - (neuro*2-1)/2)*0.35;
+    X.strokeStyle = 'rgba(111,211,232,0.38)'; X.lineWidth = 1.2;
+    X.beginPath();
+    X.moveTo(px+Math.cos(baseA)*R0*0.8, py+Math.sin(baseA)*R0*0.8);
+    X.quadraticCurveTo(
+      px+Math.cos(baseA)*(R0+18), py+Math.sin(baseA)*(R0+18),
+      px+Math.cos(baseA+Math.sin(T*2+k)*0.25)*(R0+30), py+Math.sin(baseA)*(R0+30)
+    );
+    X.stroke();
+  }
+
+  // 膜再生：绿色呼吸光晕
+  if (stk('regen')){
+    const r2 = R0 + 10 + Math.sin(T*2)*3;
+    const g = X.createRadialGradient(px,py,R0,px,py,r2+10);
+    g.addColorStop(0,'rgba(74,222,128,0.16)');
+    g.addColorStop(1,'rgba(74,222,128,0)');
+    X.fillStyle = g; X.beginPath(); X.arc(px,py,r2+10,0,TAU); X.fill();
+  }
+
+  // 免疫抑制：外圈暗环
+  if (stk('supp')){
+    X.strokeStyle = 'rgba(143,183,255,0.20)'; X.lineWidth = 1.5;
+    X.beginPath(); X.arc(px,py,R0+34 + Math.sin(T*1.5)*3,0,TAU); X.stroke();
+  }
+
+  // 热休克：体表火星
+  const heat = stk('heat');
+  for (let i=0;i<heat*3;i++){
+    const a = T*3 + i*2.1;
+    const r = R0 + 5 + ((i*7 + T*40) % 18);
+    X.fillStyle = 'rgba(240,185,60,0.55)';
+    X.beginPath(); X.arc(px+Math.cos(a)*r, py+Math.sin(a)*r, 1.6, 0, TAU); X.fill();
+  }
+
+  // 核心
+  X.fillStyle = C.core;
+  X.beginPath(); X.arc(px, py, R0*0.42 + Math.sin(T*4)*1.2, 0, TAU); X.fill();
 }
 
 // ---------------- 绘制：界面 ----------------
@@ -1275,12 +1417,15 @@ function draw(){
 
   if (screen === 'title'){ drawTitle(); return; }
 
+  // 背景在屏幕空间画（带视差），世界实体统一做一次镜头平移
+  drawBackground();
+
   X.save();
   if (shake > 0.2){
     X.translate(rr(-shake,shake), rr(-shake,shake));
   }
+  X.translate(-camX, -camY);
 
-  drawBackground();
   drawWalls();
   for (const w of waves) drawWave(w);
   drawCore();
