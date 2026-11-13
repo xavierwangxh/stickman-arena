@@ -1,0 +1,1860 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>细胞上行 · 从脚底追到大脑</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:#06080C;overflow:hidden}
+  body{display:flex;align-items:center;justify-content:center;
+       font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif}
+  #wrap{position:relative;width:100vw;height:100vh;display:flex;align-items:center;justify-content:center}
+  canvas{display:block;max-width:100%;max-height:100%;background:#06080C;
+         box-shadow:0 0 90px rgba(30,90,140,.45);cursor:crosshair}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="cv" width="1280" height="720"></canvas></div>
+<script>
+// ============================================================
+//  细胞上行 —— 你是一枚被派往脚底伤口的免疫细胞
+//  病毒在往上跑，你得在它们冲破血脑屏障之前全部清掉
+// ============================================================
+const CW = 1280, CH = 720, TAU = Math.PI * 2;
+const CV = document.getElementById('cv');
+const X  = CV.getContext('2d');
+
+const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
+const lerp  = (a,b,t) => a + (b - a) * t;
+const rr    = (a,b) => a + Math.random() * (b - a);
+const pick  = arr => arr[(Math.random() * arr.length) | 0];
+const d2    = (x1,y1,x2,y2) => { const dx=x1-x2, dy=y1-y2; return dx*dx+dy*dy; };
+
+const C = {
+  player:'#8FE8FF', core:'#EAFBFF', granule:'#B6F2FF', nucleus:'#4A7BC8',
+  wbc:'#DDE8F7', wbcCore:'#6E8FC7', macro:'#F0C08A', macroCore:'#B2763A',
+  virus:'#E2564B', virusDeep:'#8E2B34', vspike:'#FF9B7A',
+  hp:'#4ADE80', xp:'#6FD3E8', gold:'#F0B93C', danger:'#E24B4A',
+  line:'#E8EDF2', mute:'#8A94A0', cyan:'#6FD3E8', violet:'#C9A0F0'
+};
+
+// ---------------- 音频 ----------------
+let AC = null;
+function audioInit(){
+  if (AC) return;
+  try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){ AC = null; }
+}
+function sfx(kind){
+  if (!AC || muted) return;
+  try{
+    const t = AC.currentTime;
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.connect(g); g.connect(AC.destination);
+    let f0 = 440, f1 = 220, dur = 0.09, vol = 0.05, type = 'sine';
+    if (kind === 'shoot'){ f0 = 680; f1 = 380; dur = 0.06; vol = 0.03; type = 'square'; }
+    else if (kind === 'hit'){ f0 = 300; f1 = 170; dur = 0.05; vol = 0.035; type = 'triangle'; }
+    else if (kind === 'kill'){ f0 = 520; f1 = 900; dur = 0.09; vol = 0.04; }
+    else if (kind === 'hurt'){ f0 = 190; f1 = 70; dur = 0.22; vol = 0.09; type = 'sawtooth'; }
+    else if (kind === 'eat'){ f0 = 240; f1 = 90; dur = 0.26; vol = 0.08; type = 'triangle'; }
+    else if (kind === 'call'){ f0 = 620; f1 = 1120; dur = 0.2; vol = 0.055; }
+    else if (kind === 'level'){ f0 = 470; f1 = 940; dur = 0.25; vol = 0.07; }
+    else if (kind === 'evo'){ f0 = 300; f1 = 150; dur = 0.4; vol = 0.09; type = 'sawtooth'; }
+    else if (kind === 'boss'){ f0 = 120; f1 = 40; dur = 0.6; vol = 0.12; type = 'sawtooth'; }
+    else if (kind === 'win'){ f0 = 520; f1 = 1080; dur = 0.5; vol = 0.1; }
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    o.start(t); o.stop(t + dur + 0.02);
+  }catch(e){}
+}
+
+// ---------------- 人体路线：从下（脚）到上（脑） ----------------
+const ZONES = [
+  {n:'脑实质',   e:'CEREBRAL TISSUE',     top:0,     h:2600, c1:'#101B33', c2:'#080B14', wall:'#22325A'},
+  {n:'血脑屏障', e:'BLOOD-BRAIN BARRIER', top:2600,  h:2600, c1:'#1A1436', c2:'#0A0818', wall:'#332A5E'},
+  {n:'颈部淋巴结',e:'CERVICAL LYMPH',     top:5200,  h:2600, c1:'#121E2C', c2:'#080E16', wall:'#254157'},
+  {n:'胸腔血流', e:'THORACIC FLOW',       top:7800,  h:2600, c1:'#25121A', c2:'#10080C', wall:'#4A2333'},
+  {n:'腹腔淋巴', e:'ABDOMINAL LYMPH',     top:10400, h:2600, c1:'#16202A', c2:'#080D12', wall:'#2B4356'},
+  {n:'大腿肌膜', e:'FEMORAL FASCIA',      top:13000, h:2600, c1:'#2A1418', c2:'#120809', wall:'#53282E'},
+  {n:'小腿肌束', e:'CALF MUSCLE',         top:15600, h:2600, c1:'#281418', c2:'#110708', wall:'#4E262B'},
+  {n:'足底伤口', e:'PLANTAR WOUND',       top:18200, h:2600, c1:'#2E1518', c2:'#140809', wall:'#5A2A2C'}
+];
+const WORLD_H = 20800;
+const WORLD_W = 2600;
+function zoneIdx(y){ for (let i=ZONES.length-1;i>=0;i--){ if (y >= ZONES[i].top) return i; } return 0; }
+function zoneAt(y){ return ZONES[zoneIdx(y)]; }
+
+// 通道：折线节点 + smoothstep，产生真正的大幅转弯
+const TURN_STEP = 1500, TURN_AMP = 500;
+const mod = (a,b) => ((a % b) + b) % b;
+function segRand(i){ const s = Math.sin(i*127.1 + 3.7) * 43758.5453; return s - Math.floor(s); }
+function nodeX(i){ return WORLD_W/2 + (segRand(i)*2 - 1) * TURN_AMP; }
+function corridor(y){
+  const k = clamp(1 - y / WORLD_H, 0, 1);
+  const t = y / TURN_STEP;
+  const i = Math.floor(t), f = t - i;
+  const sm = f*f*(3-2*f);
+  const cx = lerp(nodeX(i), nodeX(i+1), sm);
+  const half = lerp(332, 250, k) + Math.sin(y*0.0031 + 0.5)*22;
+  return {cx, half};
+}
+
+const ESCAPE_Y = 2820;      // 越过这条线 = 病毒进入脑，感染度猛涨
+const BOSS_Y   = 3150;
+const BLOCK_Y  = 3540;      // 屏障战期间玩家不能越过
+
+// ---------------- 三种起手细胞 ----------------
+const CELLS = [
+  {k:'neut', n:'中性粒细胞', sub:'均衡 · 首次推荐', hp:220, spd:305, dmg:13, rate:0.155, r:14,
+   eatR:126, eatDmg:52, armor:0, xpMul:1, allyBonus:0, col:'#8FE8FF',
+   tip:'生命 220，射速与伤害都居中，吞噬半径标准。什么局面都能应付'},
+  {k:'macro', n:'巨噬细胞', sub:'厚血 · 慢 · 吞噬强', hp:320, spd:252, dmg:18, rate:0.235, r:17,
+   eatR:158, eatDmg:86, armor:0.10, xpMul:1, allyBonus:0, col:'#F0C08A',
+   tip:'生命 320、减伤 10%、吞噬伤害高 65%，但移动慢、射速低，靠卡位硬吃'},
+  {k:'dend', n:'树突细胞', sub:'脆 · 招募强', hp:175, spd:292, dmg:11, rate:0.145, r:13,
+   eatR:118, eatDmg:44, armor:0, xpMul:1.30, allyBonus:1, col:'#C9A0F0',
+   tip:'生命只有 175，但经验 +30%、每次趋化多召 1 名友军，靠友军打仗'}
+];
+
+// ---------------- 病毒类型 ----------------
+const VTYPES = {
+  vir:   {n:'普通病毒',     hp:34,  spd:126, dmg:8,  r:12, xp:10, col:'#E2564B'},
+  cap:   {n:'荚膜病毒',     hp:104, spd:92,  dmg:12, r:17, xp:22, col:'#D2703C', armor:0.35},
+  fast:  {n:'快速复制体',   hp:24,  spd:212, dmg:7,  r:9,  xp:12, col:'#F2A03C', split:1},
+  neuro: {n:'神经嗜性病毒', hp:30,  spd:272, dmg:7,  r:10, xp:14, col:'#C58BE8'},
+  spike: {n:'刺突病毒',     hp:58,  spd:112, dmg:10, r:13, xp:17, col:'#E2648C', ranged:1},
+  giant: {n:'巨型病毒',     hp:230, spd:64,  dmg:22, r:26, xp:42, col:'#B03A5B'}
+};
+
+// ---------------- 病毒进化阶段 ----------------
+const EVOS = [
+  {n:'荚膜增厚', d:'病毒外壳硬化，生命 +35%'},
+  {n:'快速复制', d:'复制速度提升，出现快速复制体'},
+  {n:'神经嗜性', d:'病毒上冲更快，出现神经嗜性株'},
+  {n:'刺突突变', d:'出现远程刺突病毒，伤害 +20%'},
+  {n:'巨型聚合', d:'出现巨型病毒，生命再 +30%'}
+];
+
+// ---------------- 升级池 ----------------
+const UPS = [
+  {k:'lyso',  n:'溶酶体强化', d:'颗粒伤害 +30%',              max:3, c:'#8FE8FF', f(){ P.dmgMul *= 1.30; }},
+  {k:'rate',  n:'高频分泌',   d:'射击间隔 -20%',              max:3, c:'#6FD3E8', f(){ P.rateMul *= 0.80; }},
+  {k:'multi', n:'双联分泌',   d:'每次多射 1 枚颗粒',          max:2, c:'#B6F2FF', f(){ P.shots += 1; }},
+  {k:'pierce',n:'穿孔素',     d:'颗粒多穿透 1 个病毒',        max:2, c:'#F2C14E', f(){ P.pierce += 1; }},
+  {k:'memb',  n:'细胞膜增厚', d:'生命上限 +30 并立即回复',    max:3, c:'#A8C8FF', f(){ P.maxHp += 30; P.hp += 30; }},
+  {k:'motor', n:'趋化加速',   d:'移动速度 +10%',              max:3, c:'#F0B93C', f(){ P.spdMul *= 1.10; }},
+  {k:'anti',  n:'抗氧化酶',   d:'受到伤害 -9%',               max:3, c:'#C9A0F0', f(){ P.armor += 0.09; }},
+  {k:'eat',   n:'吞噬溶酶体', d:'吞噬伤害 +45%',              max:3, c:'#E8B26A', f(){ P.eatMul *= 1.45; }},
+  {k:'eatcd', n:'吞噬节律',   d:'吞噬冷却 -22%',              max:3, c:'#4ADE80', f(){ P.eatCdMul *= 0.78; }},
+  {k:'sip',   n:'补体受体',   d:'每次击杀回复 3 点生命',      max:3, c:'#4ADE80', f(){ P.lifesteal += 3; }},
+  {k:'xp',    n:'抗原呈递',   d:'经验获取 +25%',              max:3, c:'#6FD3E8', f(){ P.xpMul *= 1.25; }},
+  {k:'calln', n:'白细胞募集', d:'趋化信号多召 1 名中性粒细胞',max:3, c:'#DDE8F7', f(){ P.neutAdd += 1; }},
+  {k:'callm', n:'巨噬募集',   d:'趋化信号额外召唤 1 名巨噬细胞',max:2,c:'#F0C08A', f(){ P.macroAdd += 1; }},
+  {k:'ifn',   n:'干扰素',     d:'附近病毒减速 25%',           max:2, c:'#8FB7FF', f(){ P.slow += 0.25; }},
+  {k:'infl',  n:'炎症小体',   d:'击杀时 34 点范围爆炸',       max:2, c:'#E24B4A', f(){ P.explode += 34; }},
+  {k:'regen', n:'细胞再生',   d:'每秒回复 1.2 点生命',        max:3, c:'#4ADE80', f(){ P.regen += 1.2; }}
+];
+
+// ---------------- 状态 ----------------
+let screen = 'title';         // title | play | upgrade | pause | over | win
+let T = 0;
+let camX = 0, camY = 0, shake = 0, flash = 0, hurtFlash = 0;
+let hint = '', hintT = 0, banner = '', bannerT = 0;
+let muted = false;
+let cell = CELLS[0];
+
+const keys = {};
+const mouse = {x: CW/2, y: CH/2, down: false, click: false};
+
+let P = null;
+let viruses = [], allies = [], bullets = [], vbullets = [], parts = [], floats = [];
+let boss = null;
+let kills = 0, runTime = 0, infect = 0, evo = 0;
+let spawnT = 0, callCd = 0, lastZone = -1;
+let upChoices = [], upTaken = {};
+let endReason = '';
+
+function newPlayer(){
+  return {
+    x: 0, y: WORLD_H - 400, vx: 0, vy: 0, r: cell.r,
+    hp: cell.hp, maxHp: cell.hp,
+    spd: cell.spd, spdMul: 1,
+    dmg: cell.dmg, dmgMul: 1, rate: cell.rate, rateMul: 1, bspd: 720,
+    shots: 1, pierce: 0,
+    armor: cell.armor, regen: 0, lifesteal: 0, xpMul: cell.xpMul,
+    slow: 0, explode: 0,
+    eatR: cell.eatR, eatDmg: cell.eatDmg, eatMul: 1, eatCdMul: 1, eatCd: 0,
+    neutAdd: cell.allyBonus, macroAdd: 0,
+    cd: 0, invuln: 1.2, dash: 0, dashCd: 0, face: 0,
+    xp: 0, level: 1, need: 44
+  };
+}
+
+function reset(){
+  P = newPlayer();
+  P.x = corridor(P.y).cx;
+  viruses = []; allies = []; bullets = []; vbullets = []; parts = []; floats = [];
+  boss = null;
+  kills = 0; runTime = 0; infect = 0; evo = 0;
+  spawnT = 1.1; callCd = 0; lastZone = zoneIdx(P.y);
+  camY = clamp(P.y - CH*0.66, 0, WORLD_H - CH);
+  camX = clamp(P.x - CW/2, 0, WORLD_W - CW);
+  upChoices = []; upTaken = {};
+  endReason = '';
+  hint = '伤口在渗血。病毒正沿着组织间隙往上跑。'; hintT = 4.0;
+  banner = ''; bannerT = 0;
+  screen = 'play';
+}
+function startRun(c){ cell = c; reset(); sfx('level'); }
+
+// ---------------- 输入 ----------------
+addEventListener('keydown', e => {
+  audioInit();
+  const k = e.key.toLowerCase();
+  keys[k] = true;
+  if (['arrowup','arrowdown','arrowleft','arrowright',' '].includes(k)) e.preventDefault();
+  if (screen === 'upgrade'){
+    if (k === '1' || k === '2' || k === '3') chooseUp(+k - 1);
+  } else if (screen === 'title'){
+    if (k === '1') startRun(CELLS[0]);
+    if (k === '2') startRun(CELLS[1]);
+    if (k === '3') startRun(CELLS[2]);
+  } else if (screen === 'over' || screen === 'win'){
+    if (k === 'enter' || k === 'r') screen = 'title';
+  } else if (screen === 'play'){
+    if (k === 'p' || k === 'escape') screen = 'pause';
+    if (k === 'm') muted = !muted;
+  } else if (screen === 'pause'){
+    if (k === 'p' || k === 'escape') screen = 'play';
+  }
+});
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+function toCanvas(ev){
+  const r = CV.getBoundingClientRect();
+  return { x: (ev.clientX - r.left) * CW / r.width, y: (ev.clientY - r.top) * CH / r.height };
+}
+CV.addEventListener('mousemove', ev => { const p = toCanvas(ev); mouse.x = p.x; mouse.y = p.y; });
+CV.addEventListener('mousedown', ev => {
+  audioInit();
+  const p = toCanvas(ev); mouse.x = p.x; mouse.y = p.y;
+  if (ev.button === 2){ mouse.right = true; }
+  else { mouse.down = true; mouse.click = true; }
+});
+addEventListener('mouseup', ev => {
+  if (ev.button === 2) mouse.right = false; else mouse.down = false;
+});
+CV.addEventListener('contextmenu', e => e.preventDefault());
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; mouse.down = false; mouse.right = false; });
+
+// ---------------- 升级选择 ----------------
+function rollUps(){
+  const pool = UPS.filter(u => (upTaken[u.k] || 0) < u.max);
+  const out = [];
+  const copy = pool.slice();
+  for (let i=0;i<3 && copy.length;i++) out.push(copy.splice((Math.random()*copy.length)|0, 1)[0]);
+  return out;
+}
+function chooseUp(i){
+  const u = upChoices[i];
+  if (!u) return;
+  u.f();
+  upTaken[u.k] = (upTaken[u.k] || 0) + 1;
+  floats.push({x: P.x, y: P.y - 40, t: 0, life: 1.2, txt: u.n, c: u.c});
+  screen = 'play';
+  sfx('level');
+  hint = '分化：' + u.n; hintT = 2.0;
+}
+function gainXp(v){
+  P.xp += v * P.xpMul;
+  while (P.xp >= P.need){
+    P.xp -= P.need;
+    P.level++;
+    P.need = Math.round(42 + P.level * 20);
+    P.hp = Math.min(P.maxHp, P.hp + 8);
+    const ch = rollUps();
+    if (ch.length){
+      upChoices = ch;
+      screen = 'upgrade';
+      sfx('level');
+      break;
+    }
+  }
+}
+
+// ---------------- 特效 ----------------
+function puff(x, y, col, n){
+  const c = col || C.player;
+  const k = n || 1;
+  for (let i=0;i<4*k;i++){
+    parts.push({x, y, vx: rr(-90,90), vy: rr(-90,90), r: rr(1.6,3.6), t: 0, life: rr(0.3,0.7), c});
+  }
+}
+function ring(x, y, col, r){
+  parts.push({x, y, r: r || 40, t: 0, life: 0.36, c: col || C.player, ring: true});
+}
+
+// ---------------- 伤害 ----------------
+function hurtPlayer(dmg){
+  if (P.invuln > 0) return;
+  P.hp -= dmg * (1 - P.armor);
+  P.invuln = 0.55;
+  hurtFlash = 0.32;
+  shake = Math.max(shake, 7);
+  sfx('hurt');
+  for (let i=0;i<7;i++) puff(P.x, P.y, C.player);
+  if (P.hp <= 0){
+    P.hp = 0;
+    endReason = '细胞被裂解：防线从这里断开，病毒继续上行。';
+    screen = 'over';
+  }
+}
+
+function killVirus(v){
+  if (v.dead) return;
+  v.dead = true;
+  kills++;
+  gainXp(v.xp);
+  infect = Math.max(0, infect - 0.9);
+  if (P.lifesteal) P.hp = Math.min(P.maxHp, P.hp + P.lifesteal);
+  if (P.explode){
+    ring(v.x, v.y, C.danger, 54);
+    for (const o of viruses){
+      if (o.dead || o === v) continue;
+      if (d2(o.x, o.y, v.x, v.y) < 96*96) damageVirus(o, P.explode, true);
+    }
+  }
+  if (v.t === 'fast' && v.split){
+    for (let i=0;i<2;i++){
+      const nv = spawnVirus(v.x + rr(-18,18), v.y + rr(-18,18), 'vir');
+      if (nv) nv.hp = nv.hpMax * 0.5;
+    }
+  }
+  for (let i=0;i<9;i++) puff(v.x, v.y, v.col || C.virus);
+  floats.push({x: v.x, y: v.y - 14, t: 0, life: 0.55, txt: '净化', c: C.hp, small: true});
+  sfx('kill');
+  shake = Math.max(shake, 3);
+}
+
+function damageVirus(v, dmg, silent){
+  if (v.dead) return;
+  const d = dmg * (1 - (v.armor || 0));
+  v.hp -= d;
+  v.hitT = 0.12;
+  v.fxT = (v.fxT || 0) - 0.016;
+  if (v.fxT <= 0){
+    v.fxT = 0.16;
+    floats.push({x: v.x, y: v.y - v.r, t: 0, life: 0.5, txt: Math.round(d), c: '#FFE08A', small: true});
+  }
+  if (!silent) sfx('hit');
+  if (v.hp <= 0) killVirus(v);
+}
+
+// ---------------- 生成 ----------------
+function pickVirusType(){
+  const pool = [['vir', 7]];
+  if (evo >= 1) pool.push(['cap', 4]);
+  if (evo >= 2) pool.push(['fast', 5], ['spike', 2]);
+  if (evo >= 3) pool.push(['neuro', 4]);
+  if (evo >= 4) pool.push(['giant', 2], ['cap', 3], ['spike', 3]);
+  if (evo >= 5) pool.push(['giant', 3], ['neuro', 3]);
+  let total = 0;
+  for (const p of pool) total += p[1];
+  let r = Math.random() * total;
+  for (const p of pool){ r -= p[1]; if (r <= 0) return p[0]; }
+  return 'vir';
+}
+
+function spawnVirus(x, y, type){
+  const key = type || pickVirusType();
+  const t = VTYPES[key] || VTYPES.vir;
+  if (x === undefined || y === undefined){
+    const half = corridor(P.y - 420).half;
+    const c = corridor(P.y - 420);
+    x = clamp(c.cx + rr(-half*0.72, half*0.72), 90, WORLD_W - 90);
+    y = P.y - rr(300, 660);
+  }
+  const hpMul = (1 + infect * 0.0035) * (1 + (evo >= 1 ? 0.35 : 0)) * (1 + (evo >= 5 ? 0.30 : 0));
+  const hp = Math.round(t.hp * hpMul);
+  const v = {
+    t: key, x, y, r: t.r, hp, hpMax: hp,
+    spd: t.spd * (1 + evo * 0.045),
+    dmg: t.dmg * (1 + (evo >= 4 ? 0.20 : 0)) * (1 + evo * 0.06),
+    xp: t.xp, col: t.col, armor: t.armor || 0,
+    split: t.split || 0, ranged: t.ranged || 0,
+    lunge: 0, lungeCd: rr(1.6, 3.4), lx: 0, ly: 0, shedCd: rr(1.6, 3.2),
+    vx: 0, vy: -t.spd, wob: rr(0, TAU), hitT: 0, dead: false, hitCd: 0, shotCd: rr(0.8, 2.0)
+  };
+  viruses.push(v);
+  for (let i=0;i<5;i++) puff(x, y, t.col, 0.5);
+  return v;
+}
+
+function summonAllies(){
+  if (callCd > 0) return;
+  callCd = 13;
+  const n = 2 + P.neutAdd;
+  const m = P.macroAdd;
+  for (let i=0;i<n+m;i++){
+    const isM = i >= n;
+    const a = {
+      t: isM ? 'macro' : 'neut',
+      x: P.x + rr(-46,46), y: P.y + rr(24, 74),
+      vx: 0, vy: 0,
+      hp: isM ? 130 : 54, hpMax: isM ? 130 : 54,
+      spd: isM ? 132 : 236,
+      dmg: isM ? 20 : 6 + P.level * 0.45,
+      r: isM ? 19 : 11,
+      cd: rr(0.1, 0.5), life: isM ? 26 : 20, hitT: 0, dead: false
+    };
+    allies.push(a);
+    for (let k=0;k<6;k++) puff(a.x, a.y, isM ? C.macro : C.wbc);
+  }
+  ring(P.x, P.y, C.cyan, 70);
+  floats.push({x: P.x, y: P.y - 54, t: 0, life: 1.2, txt: '趋化信号 · 友军抵达', c: C.cyan});
+  sfx('call');
+}
+
+function doEat(){
+  if (P.eatCd > 0) return;
+  P.eatCd = 6.2 * P.eatCdMul;
+  const R = P.eatR;
+  const ang = P.face;
+  let hits = 0;
+  for (const v of viruses){
+    if (v.dead) continue;
+    const dd = Math.hypot(v.x - P.x, v.y - P.y);
+    if (dd < R + v.r){
+      damageVirus(v, P.eatDmg * P.eatMul, true);
+      hits++;
+    }
+  }
+  for (const a of allies){
+    if (!a.dead && Math.hypot(a.x - P.x, a.y - P.y) < R) a.hp = Math.min(a.hpMax, a.hp + 20);
+  }
+  infect = Math.max(0, infect - 2.8);
+  if (hits) P.hp = Math.min(P.maxHp, P.hp + Math.min(14, hits * 4));
+  ring(P.x, P.y, C.granule, R);
+  for (let i=0;i<16;i++){
+    const a = rr(0, TAU), d = rr(20, R);
+    parts.push({x: P.x + Math.cos(a)*d, y: P.y + Math.sin(a)*d, vx: Math.cos(a)*40, vy: Math.sin(a)*40,
+                r: rr(2,4), t: 0, life: 0.45, c: C.granule});
+  }
+  shakes(9);
+  sfx('eat');
+  floats.push({x: P.x, y: P.y - 30, t: 0, life: 1.0, txt: hits ? '吞噬 ×' + hits + ' · 感染 -2.8' : '吞噬 · 感染 -2.8', c: C.hp});
+}
+function shakes(v){ shake = Math.max(shake, v); }
+
+// ---------------- 更新 ----------------
+function update(dt){
+  T += dt;
+  if (hintT > 0) hintT -= dt;
+  if (bannerT > 0) bannerT -= dt;
+  if (shake > 0) shake = Math.max(0, shake - dt * 34);
+  if (flash > 0) flash = Math.max(0, flash - dt * 2.2);
+  if (hurtFlash > 0) hurtFlash = Math.max(0, hurtFlash - dt * 1.6);
+
+  if (screen !== 'play') return;
+
+  runTime += dt;
+  if (callCd > 0) callCd = Math.max(0, callCd - dt);
+  if (P.eatCd > 0) P.eatCd = Math.max(0, P.eatCd - dt);
+  if (P.invuln > 0) P.invuln -= dt;
+  if (P.dash > 0) P.dash -= dt;
+  if (P.dashCd > 0) P.dashCd -= dt;
+  if (P.regen) P.hp = Math.min(P.maxHp, P.hp + P.regen * dt);
+
+  updatePlayer(dt);
+  updateShooting(dt);
+  updateSpawn(dt);
+  updateViruses(dt);
+  updateAllies(dt);
+  updateBullets(dt);
+  updateBoss(dt);
+  updateEvo(dt);
+  updateInfect(dt);
+
+  // 区域提示
+  const zi = zoneIdx(P.y);
+  if (zi !== lastZone){
+    lastZone = zi;
+    hint = '进入：' + ZONES[zi].n + '　' + ZONES[zi].e;
+    hintT = 2.6;
+  }
+
+  // 镜头
+  const wantY = clamp(P.y - CH*0.66, 0, WORLD_H - CH);
+  camY = lerp(camY, wantY, Math.min(1, dt*7));
+  const wantX = clamp(P.x - CW/2, 0, WORLD_W - CW);
+  camX = lerp(camX, wantX, Math.min(1, dt*4.2));
+
+  updateParts(dt);
+
+  if (infect >= 100 && screen === 'play'){
+    infect = 100;
+    endReason = '感染度达到 100%：病毒在脑内完成复制，中枢失守。';
+    screen = 'over';
+    sfx('boss');
+  }
+}
+
+function updateParts(dt){
+  for (const p of parts){
+    p.t += dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vx *= 0.94; p.vy *= 0.94;
+  }
+  parts = parts.filter(p => p.t < p.life);
+  for (const f of floats) f.t += dt;
+  floats = floats.filter(f => f.t < f.life);
+}
+
+function updatePlayer(dt){
+  let ax = (keys['d'] || keys['arrowright'] ? 1 : 0) - (keys['a'] || keys['arrowleft'] ? 1 : 0);
+  let ay = (keys['s'] || keys['arrowdown'] ? 1 : 0) - (keys['w'] || keys['arrowup'] ? 1 : 0);
+  const len = Math.hypot(ax, ay) || 1;
+  ax /= len; ay /= len;
+
+  if ((keys['shift']) && P.dashCd <= 0 && (ax || ay)){
+    P.dash = 0.16; P.dashCd = 1.5;
+    sfx('shoot');
+    ring(P.x, P.y, C.cyan, 34);
+  }
+
+  const spd = P.spd * P.spdMul * (P.dash > 0 ? 3.1 : 1);
+  P.vx = lerp(P.vx, ax * spd, Math.min(1, dt * 13));
+  P.vy = lerp(P.vy, ay * spd, Math.min(1, dt * 13));
+  P.x += P.vx * dt;
+  P.y += P.vy * dt;
+
+  P.y = clamp(P.y, 400, WORLD_H - 60);
+  const c = corridor(P.y);
+  P.x = clamp(P.x, c.cx - (c.half - P.r), c.cx + (c.half - P.r));
+  P.x = clamp(P.x, 40, WORLD_W - 40);
+
+  if (boss && !boss.dead && P.y < BLOCK_Y) P.y = BLOCK_Y;
+
+  const aim = Math.atan2((mouse.y + camY) - P.y, (mouse.x + camX) - P.x);
+  P.face = aim;
+}
+
+function updateShooting(dt){
+  if (P.cd > 0) P.cd -= dt;
+  const wants = mouse.down || keys[' '];
+  if (!wants) return;
+  if (P.cd > 0) return;
+  P.cd = P.rate * P.rateMul;
+  const n = P.shots;
+  const spread = n > 1 ? 0.11 : 0;
+  for (let i=0;i<n;i++){
+    const a = P.face + (i - (n-1)/2) * spread + rr(-0.02, 0.02);
+    bullets.push({
+      x: P.x + Math.cos(a) * (P.r + 4),
+      y: P.y + Math.sin(a) * (P.r + 4),
+      vx: Math.cos(a) * P.bspd, vy: Math.sin(a) * P.bspd,
+      r: 4.5, dmg: P.dmg * P.dmgMul, life: 0.62, pierce: P.pierce, dead: false
+    });
+  }
+  sfx('shoot');
+}
+
+function updateSpawn(dt){
+  if (boss && !boss.dead) return;
+  spawnT -= dt;
+  const dg = clamp(1 - P.y / WORLD_H, 0, 1);
+  const cap = 9 + Math.round(dg * 7);
+  const alive = viruses.reduce((n,v) => n + (v.dead ? 0 : 1), 0);
+  if (spawnT <= 0 && alive < cap){
+    spawnT = Math.max(0.26, 0.92 - dg * 0.42) * (1 - evo * 0.05);
+    spawnVirus();
+    if (Math.random() < 0.28 + evo * 0.06) spawnVirus();
+  }
+}
+
+function updateViruses(dt){
+  for (const v of viruses){
+    if (v.dead) continue;
+    if (v.hitT > 0) v.hitT -= dt;
+    if (v.hitCd > 0) v.hitCd -= dt;
+
+    const c = corridor(v.y);
+    let slow = 1;
+    if (P.slow && d2(v.x, v.y, P.x, P.y) < 230*230) slow -= P.slow;
+
+    const distP = Math.hypot(P.x - v.x, P.y - v.y);
+
+    if (v.lunge > 0){
+      // 扑咬中：直冲玩家，不再上行
+      v.lunge -= dt;
+      v.vx = lerp(v.vx, v.lx * 560, Math.min(1, dt*8));
+      v.vy = lerp(v.vy, v.ly * 560, Math.min(1, dt*8));
+    } else if (v.ranged && d2(v.x, v.y, P.x, P.y) < 380*380){
+      // 刺突病毒：保持距离并射击
+      const dist = Math.hypot(v.x - P.x, v.y - P.y);
+      const ang = Math.atan2(P.y - v.y, P.x - v.x);
+      if (dist < 220){
+        v.vx = lerp(v.vx, -Math.cos(ang) * v.spd * 0.9, dt*3);
+        v.vy = lerp(v.vy, -Math.sin(ang) * v.spd * 0.9, dt*3);
+      } else {
+        v.vx = lerp(v.vx, Math.cos(ang) * 26, dt*3);
+        v.vy = lerp(v.vy, 26, dt*3);
+      }
+      v.shotCd -= dt;
+      if (v.shotCd <= 0 && dist < 380){
+        v.shotCd = 2.1;
+        const a2 = Math.atan2(P.y - v.y, P.x - v.x);
+        vbullets.push({x: v.x, y: v.y, vx: Math.cos(a2)*300, vy: Math.sin(a2)*300,
+                       dmg: v.dmg * 0.85, r: 6, life: 2.4, col: v.col, dead: false});
+      }
+    } else {
+      // 反噬：被贴近时蓄力扑咬（神经嗜性株只逃不打）
+      v.lungeCd -= dt;
+      if (v.lungeCd <= 0 && distP < 330 && distP > 34 && v.t !== 'neuro'){
+        v.lunge = 0.36;
+        v.lungeCd = rr(2.2, 3.5);
+        const la = Math.atan2(P.y - v.y, P.x - v.x);
+        v.lx = Math.cos(la); v.ly = Math.sin(la);
+        ring(v.x, v.y, C.virus, 24);
+      }
+      // 荚膜与巨型病毒会「排毒」：朝玩家吐一颗慢速病毒颗粒
+      if (v.t === 'cap' || v.t === 'giant'){
+        v.shedCd -= dt;
+        if (v.shedCd <= 0 && distP < 470){
+          v.shedCd = v.t === 'giant' ? 2.2 : 3.2;
+          const sa = Math.atan2(P.y - v.y, P.x - v.x) + rr(-0.09, 0.09);
+          vbullets.push({x: v.x, y: v.y, vx: Math.cos(sa)*250, vy: Math.sin(sa)*250,
+                         dmg: v.dmg * 0.72, r: 5.5, life: 2.4, col: v.col, dead: false});
+        }
+      }
+      // 其余病毒：全力向上逃，带一点横向游走
+      v.wob += dt * 0.9;
+      const targetX = c.cx + Math.sin(v.wob) * c.half * 0.38;
+      const wantVx = clamp((targetX - v.x) * 0.85, -95, 95);
+      v.vx = lerp(v.vx, wantVx, dt*2.0);
+      v.vy = lerp(v.vy, -v.spd * slow, dt*3.2);
+    }
+
+    v.x += v.vx * dt;
+    v.y += v.vy * dt;
+    v.x = clamp(v.x, c.cx - (c.half - v.r), c.cx + (c.half - v.r));
+
+    // 接触伤害
+    if (d2(v.x, v.y, P.x, P.y) < (v.r + P.r + 2) * (v.r + P.r + 2) && v.hitCd <= 0){
+      v.hitCd = 0.8;
+      hurtPlayer(v.dmg * (v.lunge > 0 ? 1.5 : 1));
+      v.lunge = 0;
+      const a = Math.atan2(P.y - v.y, P.x - v.x);
+      P.vx += Math.cos(a) * 120;
+      P.vy += Math.sin(a) * 120;
+    }
+
+    // 逃跑判定
+    if (v.y < P.y - 1500){
+      v.dead = true;
+      infect = Math.min(100, infect + (v.y < ESCAPE_Y ? 5.4 : 1.6));
+      floats.push({x: P.x, y: P.y - 46, t: 0, life: 1.1,
+                   txt: v.y < ESCAPE_Y ? '突破屏障 · 感染 +5.4' : '病毒扩散 · 感染 +1.6',
+                   c: C.danger, small: true});
+      continue;
+    }
+    if (v.y < ESCAPE_Y){
+      v.dead = true;
+      infect = Math.min(100, infect + 5.4);
+      continue;
+    }
+  }
+  viruses = viruses.filter(v => !v.dead);
+}
+
+function updateAllies(dt){
+  for (const a of allies){
+    if (a.dead) continue;
+    if (a.hitT > 0) a.hitT -= dt;
+    a.life -= dt;
+    if (a.life <= 0){ a.dead = true; for (let i=0;i<6;i++) puff(a.x, a.y, a.t === 'macro' ? C.macro : C.wbc); continue; }
+
+    // 找最近的病毒
+    let best = null, bd = 1e9;
+    for (const v of viruses){
+      if (v.dead) continue;
+      const d = d2(v.x, v.y, a.x, a.y);
+      if (d < bd){ bd = d; best = v; }
+    }
+
+    if (best && bd < 460*460){
+      const ang = Math.atan2(best.y - a.y, best.x - a.x);
+      const want = a.t === 'macro' ? 34 : 190;
+      const dist = Math.sqrt(bd);
+      if (dist > want){
+        a.vx = lerp(a.vx, Math.cos(ang) * a.spd, dt*4);
+        a.vy = lerp(a.vy, Math.sin(ang) * a.spd, dt*4);
+      } else {
+        a.vx = lerp(a.vx, 0, dt*4);
+        a.vy = lerp(a.vy, 0, dt*4);
+      }
+      a.cd -= dt;
+      if (a.cd <= 0 && dist < (a.t === 'macro' ? 62 : 430)){
+        a.cd = a.t === 'macro' ? 0.62 : 0.78;
+        if (a.t === 'macro'){
+          damageVirus(best, a.dmg, true);
+          ring(a.x, a.y, C.macro, 30);
+        } else {
+          // 打提前量：病毒在跑，友军不能只瞄当前位置
+          const lead = dist / 460;
+          const aimA = Math.atan2((best.y + best.vy * lead) - a.y, (best.x + best.vx * lead) - a.x);
+          vbullets.push({x: a.x, y: a.y, vx: Math.cos(aimA)*460, vy: Math.sin(aimA)*460,
+                         dmg: a.dmg, r: 4, life: 0.9, col: C.wbc, friendly: true, dead: false});
+        }
+      }
+    } else {
+      // 跟随玩家
+      const tx = P.x + Math.cos(a.life * 0.8 + a.r) * 62;
+      const ty = P.y + 54 + Math.sin(a.life * 0.8 + a.r) * 30;
+      const ang = Math.atan2(ty - a.y, tx - a.x);
+      const dist = Math.hypot(tx - a.x, ty - a.y);
+      if (dist > 46){
+        a.vx = lerp(a.vx, Math.cos(ang) * a.spd * 0.9, dt*3);
+        a.vy = lerp(a.vy, Math.sin(ang) * a.spd * 0.9, dt*3);
+      } else {
+        a.vx = lerp(a.vx, 0, dt*5);
+        a.vy = lerp(a.vy, 0, dt*5);
+      }
+    }
+
+    a.x += a.vx * dt;
+    a.y += a.vy * dt;
+    const c = corridor(a.y);
+    a.x = clamp(a.x, c.cx - c.half + a.r, c.cx + c.half - a.r);
+
+    // 病毒接触友军会造成伤害
+    for (const v of viruses){
+      if (v.dead) continue;
+      if (d2(v.x, v.y, a.x, a.y) < (v.r + a.r) * (v.r + a.r)){
+        a.hp -= v.dmg * dt * 0.7;
+        if (a.hp <= 0){ a.dead = true; for (let i=0;i<6;i++) puff(a.x, a.y, C.wbc); break; }
+      }
+    }
+  }
+  allies = allies.filter(a => !a.dead);
+}
+
+function updateBullets(dt){
+  for (const b of bullets){
+    if (b.dead) continue;
+    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+    if (b.life <= 0){ b.dead = true; continue; }
+    const c = corridor(b.y);
+    if (Math.abs(b.x - c.cx) > c.half){ b.dead = true; continue; }
+
+    let hit = false;
+    for (const v of viruses){
+      if (v.dead) continue;
+      if (d2(b.x, b.y, v.x, v.y) < (v.r + b.r) * (v.r + b.r)){
+        damageVirus(v, b.dmg);
+        hit = true;
+        break;
+      }
+    }
+    if (hit){
+      if (b.pierce > 0) b.pierce--;
+      else b.dead = true;
+      continue;
+    }
+
+    if (boss && !boss.dead){
+      let hitBoss = false;
+      for (const nd of boss.nodes){
+        if (nd.dead) continue;
+        if (d2(b.x, b.y, nd.x, nd.y) < (nd.r + b.r) * (nd.r + b.r)){
+          nd.hp -= b.dmg; nd.hitT = 0.12; hitBoss = true;
+          floats.push({x: nd.x, y: nd.y - nd.r, t:0, life:0.5, txt: Math.round(b.dmg), c:'#FFE08A', small:true});
+          if (nd.hp <= 0){
+            nd.dead = true;
+            for (let i=0;i<14;i++) puff(nd.x, nd.y, '#FF9BD6');
+            ring(nd.x, nd.y, '#FF9BD6', 60);
+            shake = Math.max(shake, 8);
+            if (boss.nodes.every(n => n.dead)){
+              boss.phase = 'core';
+              hint = '复制核全部击碎：攻击病毒母体核心';
+              hintT = 3.2;
+            }
+          }
+          break;
+        }
+      }
+      if (!hitBoss && boss.phase === 'core'){
+        if (d2(b.x, b.y, boss.x, boss.y) < (74 + b.r) * (74 + b.r)){
+          boss.hp -= b.dmg; boss.hitT = 0.12; hitBoss = true;
+          floats.push({x: boss.x, y: boss.y - 80, t:0, life:0.5, txt: Math.round(b.dmg), c:'#FFE08A', small:true});
+          if (boss.hp <= 0) defeatBoss();
+        }
+      }
+      if (hitBoss){ if (b.pierce > 0) b.pierce--; else b.dead = true; }
+    }
+  }
+  bullets = bullets.filter(b => !b.dead);
+
+  for (const b of vbullets){
+    if (b.dead) continue;
+    b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+    if (b.life <= 0){ b.dead = true; continue; }
+    if (b.friendly){
+      for (const v of viruses){
+        if (v.dead) continue;
+        if (d2(b.x, b.y, v.x, v.y) < (v.r + b.r) * (v.r + b.r)){
+          damageVirus(v, b.dmg, true); b.dead = true; break;
+        }
+      }
+    } else {
+      if (d2(b.x, b.y, P.x, P.y) < (P.r + b.r) * (P.r + b.r)){
+        hurtPlayer(b.dmg); b.dead = true;
+      }
+    }
+    if (b.dead && b.friendly === undefined) for (let i=0;i<3;i++) puff(b.x, b.y, b.col || C.virus, 0.4);
+  }
+  vbullets = vbullets.filter(b => !b.dead);
+}
+
+function updateBoss(dt){
+  if (boss && !boss.dead && P.y < 3800 && !boss.intro){
+    boss.intro = true;
+  }
+  if (!boss && P.y < 3800){
+    spawnBoss();
+  }
+  if (!boss || boss.dead) return;
+  boss.t += dt;
+  boss.arm += dt * 0.55;
+  if (boss.hitT > 0) boss.hitT -= dt;
+
+  // 伪足扫击
+  const bx = boss.x, by = boss.y;
+  const ax2 = bx + Math.cos(boss.arm) * 520, ay2 = by + Math.sin(boss.arm) * 520;
+  const px = P.x, py = P.y;
+  const dx = ax2 - bx, dy = ay2 - by;
+  const t = clamp(((px - bx) * dx + (py - by) * dy) / (dx*dx + dy*dy), 0, 1);
+  const cx = bx + dx * t, cy = by + dy * t;
+  if (Math.hypot(px - cx, py - cy) < 26){
+    hurtPlayer(14);
+    P.vx += -Math.sin(boss.arm) * 300;
+    P.vy += Math.cos(boss.arm) * 300;
+  }
+
+  boss.fireCd -= dt;
+  if (boss.phase === 'nodes'){
+    if (boss.fireCd <= 0){
+      boss.fireCd = 2.0;
+      const live = boss.nodes.filter(n => !n.dead);
+      if (live.length){
+        const nd = pick(live);
+        const a = Math.atan2(P.y - nd.y, P.x - nd.x);
+        vbullets.push({x: nd.x, y: nd.y, vx: Math.cos(a)*280, vy: Math.sin(a)*280,
+                       dmg: 13, r: 6, life: 3, col:'#FF7BD6', dead:false});
+      }
+    }
+    boss.spawnCd -= dt;
+    if (boss.spawnCd <= 0){
+      boss.spawnCd = 3.6;
+      for (let i=0;i<2;i++) spawnVirus(boss.x + rr(-160,160), boss.y + rr(60, 180), pick(['vir','fast']));
+    }
+  } else if (boss.phase === 'core'){
+    if (boss.fireCd <= 0){
+      boss.fireCd = 1.8;
+      for (let i=0;i<8;i++){
+        const a = i/8 * TAU + boss.t;
+        vbullets.push({x: boss.x, y: boss.y, vx: Math.cos(a)*240, vy: Math.sin(a)*240,
+                       dmg: 10, r: 6, life: 3, col:'#B03A5B', dead:false});
+      }
+    }
+    boss.spawnCd -= dt;
+    if (boss.spawnCd <= 0){
+      boss.spawnCd = 3.0;
+      spawnVirus(boss.x + rr(-140,140), boss.y + 140, 'vir');
+    }
+  }
+}
+
+function spawnBoss(){
+  const cx = corridor(BOSS_Y).cx;
+  const c2 = corridor(3400);
+  boss = {
+    x: cx, y: BOSS_Y, t: 0, arm: 0, hitT: 0, dead: false, phase: 'nodes',
+    hp: 540, hpMax: 540, fireCd: 2.0, spawnCd: 2.8, intro: true,
+    nodes: []
+  };
+  for (let i=-1;i<=1;i++){
+    boss.nodes.push({x: cx + i * c2.half * 0.58, y: 3400, r: 20, hp: 190, hpMax: 190, dead: false, hitT: 0});
+  }
+  // 清场：给一段干净的 BOSS 战
+  for (const v of viruses){ v.dead = true; for (let i=0;i<4;i++) puff(v.x, v.y, v.col); }
+  viruses = [];
+  vbullets = [];
+  hint = '血脑屏障：病毒母体正在聚合。先击碎三处复制核。';
+  hintT = 4.5;
+  banner = '目标：病毒母体'; bannerT = 3.0;
+  shake = Math.max(shake, 14);
+  sfx('boss');
+}
+function defeatBoss(){
+  boss.dead = true;
+  for (let i=0;i<50;i++) puff(boss.x + rr(-200,200), boss.y + rr(-160,160), '#FF7BD6');
+  ring(boss.x, boss.y, '#FF9BD6', 220);
+  shake = Math.max(shake, 20);
+  flash = 0.5;
+  endReason = '';
+  screen = 'win';
+  sfx('win');
+}
+
+function updateEvo(dt){
+  const marks = [14, 29, 45, 62, 79];
+  if (evo < marks.length && runTime >= marks[evo]){
+    evo++;
+    const e = EVOS[evo-1];
+    banner = '病毒进化 Lv.' + evo + ' · ' + e.n;
+    bannerT = 3.4;
+    hint = e.d; hintT = 3.4;
+    sfx('evo');
+    shake = Math.max(shake, 6);
+    for (let i=0;i<20;i++) puff(P.x + rr(-300,300), P.y - rr(60, 400), C.virus, 1);
+  }
+}
+
+function updateInfect(dt){
+  const dg = clamp(1 - P.y / WORLD_H, 0, 1);
+  let rate = 0.38 + dg * 0.34;
+  if (boss && !boss.dead) rate += 1.05;   // 屏障战：病毒加速复制，感染度涨得更快
+  infect = Math.min(100, infect + rate * dt);
+}
+
+// ---------------- 绘制：世界 ----------------
+function drawBackground(){
+  const z = zoneAt(camY + CH/2);
+  const g = X.createLinearGradient(0,0,0,CH);
+  g.addColorStop(0, z.c1); g.addColorStop(1, z.c2);
+  X.fillStyle = g; X.fillRect(0,0,CW,CH);
+
+  // 组织纤维
+  X.strokeStyle = 'rgba(180,220,255,0.035)'; X.lineWidth = 1.4;
+  for (let i=0;i<28;i++){
+    const yy = mod(i*131.7 + camY*0.35, CH+220) - 110;
+    const base = mod(Math.sin(i*12.9898)*43758.5453, 1);
+    const xx = mod(base*(CW+240) - camX*0.12, CW+240) - 120;
+    const len = 120 + (i%5)*60;
+    X.beginPath();
+    X.moveTo(xx-len/2, yy);
+    X.quadraticCurveTo(xx, yy + Math.sin(i + T*0.2)*22, xx+len/2, yy+12);
+    X.stroke();
+  }
+
+  // 远景细胞
+  for (let i=0;i<14;i++){
+    const yy = mod(i*211.7 + camY*0.55 + T*8, CH+160) - 80;
+    const base = mod(Math.sin(i*78.233)*12345.6789, 1);
+    const xx = mod(base*(CW+200) - camX*0.2, CW+200) - 100;
+    X.globalAlpha = 0.12;
+    X.fillStyle = i%3 ? '#6E8FC7' : '#DDE8F7';
+    X.beginPath(); X.arc(xx, yy, 9 + (i%4)*3, 0, TAU); X.fill();
+    X.globalAlpha = 1;
+  }
+}
+
+function drawWalls(){
+  const z = zoneAt(camY + CH/2);
+  const y0 = camY - 200, y1 = camY + CH + 200;
+  const LX = camX - 160, RX = camX + CW + 160;
+  for (const side of [-1, 1]){
+    const pts = [];
+    for (let y=y0; y<=y1; y+=26){
+      const c = corridor(y);
+      const wob = Math.sin(y*0.012 + side)*9 + Math.sin(y*0.0043)*16;
+      pts.push([c.cx + side*(c.half + wob), y]);
+    }
+    X.beginPath();
+    X.moveTo(pts[0][0], pts[0][1]);
+    for (let i=1;i<pts.length;i++) X.lineTo(pts[i][0], pts[i][1]);
+    const edgeX = side < 0 ? LX : RX;
+    X.lineTo(edgeX, y1); X.lineTo(edgeX, y0); X.closePath();
+    X.fillStyle = z.wall; X.fill();
+    const g = X.createLinearGradient(edgeX, 0, camX + CW*(side<0?0.4:0.6), 0);
+    g.addColorStop(0,'rgba(0,0,0,0.62)');
+    g.addColorStop(1,'rgba(0,0,0,0.04)');
+    X.fillStyle = g; X.fill();
+
+    // 内皮细胞格纹
+    X.strokeStyle = 'rgba(180,220,255,0.07)'; X.lineWidth = 1;
+    for (let i=0;i<pts.length;i+=4){
+      const px = pts[i][0];
+      X.beginPath();
+      X.moveTo(px, pts[i][1]);
+      X.lineTo(px - side*18, pts[i][1]);
+      X.stroke();
+    }
+
+    X.beginPath();
+    X.moveTo(pts[0][0], pts[0][1]);
+    for (let i=1;i<pts.length;i++) X.lineTo(pts[i][0], pts[i][1]);
+    X.strokeStyle = 'rgba(180,235,255,0.24)'; X.lineWidth = 2.5; X.stroke();
+  }
+}
+
+function drawEscapeLine(){
+  if (ESCAPE_Y < camY - 120 || ESCAPE_Y > camY + CH + 120) return;
+  // 越过即为脑：上方染红
+  const top = camY - 400;
+  const h = ESCAPE_Y - top;
+  if (h > 0){
+    const g = X.createLinearGradient(0, top, 0, ESCAPE_Y);
+    g.addColorStop(0,'rgba(120,20,40,0.52)');
+    g.addColorStop(0.7,'rgba(160,30,50,0.30)');
+    g.addColorStop(1,'rgba(200,60,70,0.10)');
+    X.fillStyle = g;
+    X.fillRect(camX - 400, top, CW + 800, h);
+  }
+  // 屏障线
+  X.strokeStyle = 'rgba(255,140,140,0.55)';
+  X.lineWidth = 2;
+  X.setLineDash([14, 12]);
+  X.beginPath();
+  X.moveTo(camX - 200, ESCAPE_Y);
+  X.lineTo(camX + CW + 200, ESCAPE_Y);
+  X.stroke();
+  X.setLineDash([]);
+  X.fillStyle = 'rgba(255,170,170,0.8)';
+  X.font = '600 13px sans-serif';
+  X.textAlign = 'center';
+  X.fillText('血脑屏障 · 病毒越过即进入大脑', corridor(ESCAPE_Y).cx, ESCAPE_Y - 12);
+}
+
+function drawVirus(v){
+  if (v.dead) return;
+  if (v.y < camY - 200 || v.y > camY + CH + 200) return;
+  if (v.x < camX - 260 || v.x > camX + CW + 260) return;
+
+  const flash = v.hitT > 0;
+  const col = flash ? '#FFFFFF' : v.col;
+  X.save();
+  X.translate(v.x, v.y);
+
+  if (v.t === 'vir'){
+    X.fillStyle = col;
+    X.beginPath();
+    for (let i=0;i<6;i++){
+      const a = i/6*TAU + v.wob*0.2;
+      const r = v.r;
+      i===0 ? X.moveTo(Math.cos(a)*r, Math.sin(a)*r) : X.lineTo(Math.cos(a)*r, Math.sin(a)*r);
+    }
+    X.closePath(); X.fill();
+    X.fillStyle = 'rgba(20,6,10,0.55)';
+    X.beginPath(); X.arc(0,0,v.r*0.44,0,TAU); X.fill();
+    // 刺突
+    X.strokeStyle = flash ? '#FFF' : C.vspike; X.lineWidth = 1.6;
+    for (let i=0;i<7;i++){
+      const a = i/7*TAU + v.wob*0.3;
+      X.beginPath();
+      X.moveTo(Math.cos(a)*v.r, Math.sin(a)*v.r);
+      X.lineTo(Math.cos(a)*(v.r+5), Math.sin(a)*(v.r+5));
+      X.stroke();
+    }
+  } else if (v.t === 'cap'){
+    X.fillStyle = 'rgba(210,112,60,0.22)';
+    X.beginPath(); X.arc(0,0,v.r+9,0,TAU); X.fill();
+    X.strokeStyle = 'rgba(255,190,140,0.55)'; X.lineWidth = 2;
+    X.beginPath(); X.arc(0,0,v.r+9,0,TAU); X.stroke();
+    X.fillStyle = col;
+    X.beginPath(); X.arc(0,0,v.r,0,TAU); X.fill();
+    X.fillStyle = 'rgba(60,20,10,0.5)';
+    X.beginPath(); X.arc(0,0,v.r*0.42,0,TAU); X.fill();
+    // 甲片纹
+    X.strokeStyle = 'rgba(255,220,190,0.35)'; X.lineWidth = 1.2;
+    for (let i=0;i<4;i++){
+      X.beginPath(); X.arc(0,0,v.r*0.7, i*1.5, i*1.5+0.9); X.stroke();
+    }
+  } else if (v.t === 'fast'){
+    // 尾迹
+    for (let i=1;i<=3;i++){
+      X.globalAlpha = 0.20 - i*0.05;
+      X.fillStyle = col;
+      X.beginPath(); X.arc(0, i*9, v.r*(1-i*0.16), 0, TAU); X.fill();
+    }
+    X.globalAlpha = 1;
+    X.fillStyle = col;
+    X.beginPath();
+    X.moveTo(0, -v.r*1.3);
+    X.lineTo(v.r, v.r);
+    X.lineTo(-v.r, v.r);
+    X.closePath(); X.fill();
+    X.fillStyle = '#2A1206';
+    X.beginPath(); X.arc(0,0,v.r*0.3,0,TAU); X.fill();
+  } else if (v.t === 'neuro'){
+    X.strokeStyle = col; X.lineWidth = 2.4;
+    X.beginPath();
+    X.moveTo(0, 0);
+    X.quadraticCurveTo(Math.sin(v.wob*2)*10, 12, Math.sin(v.wob*2+1)*7, 26);
+    X.stroke();
+    X.fillStyle = col;
+    X.beginPath(); X.ellipse(0,0,v.r*0.8, v.r*1.35, 0, 0, TAU); X.fill();
+    X.fillStyle = '#F0DCFF';
+    X.beginPath(); X.arc(0,-v.r*0.4,v.r*0.28,0,TAU); X.fill();
+  } else if (v.t === 'spike'){
+    X.fillStyle = col;
+    X.beginPath(); X.arc(0,0,v.r,0,TAU); X.fill();
+    X.strokeStyle = flash ? '#FFF' : C.vspike; X.lineWidth = 2;
+    for (let i=0;i<10;i++){
+      const a = i/10*TAU + T*0.7;
+      const len = v.r + 10 + Math.sin(T*5+i)*3;
+      X.beginPath();
+      X.moveTo(Math.cos(a)*v.r, Math.sin(a)*v.r);
+      X.lineTo(Math.cos(a)*len, Math.sin(a)*len);
+      X.stroke();
+    }
+    X.fillStyle = 'rgba(255,230,240,0.85)';
+    X.beginPath(); X.arc(0,0,v.r*0.34,0,TAU); X.fill();
+  } else if (v.t === 'giant'){
+    X.fillStyle = flash ? '#FFF' : 'rgba(176,58,91,0.92)';
+    X.beginPath();
+    for (let i=0;i<=20;i++){
+      const a = i/20*TAU;
+      const rad = v.r*(1 + 0.16*Math.sin(a*4 + v.wob) + 0.08*Math.sin(a*7));
+      i===0 ? X.moveTo(Math.cos(a)*rad, Math.sin(a)*rad) : X.lineTo(Math.cos(a)*rad, Math.sin(a)*rad);
+    }
+    X.closePath(); X.fill();
+    X.strokeStyle = 'rgba(255,150,180,0.5)'; X.lineWidth = 2; X.stroke();
+    X.fillStyle = 'rgba(30,6,14,0.55)';
+    for (let i=0;i<3;i++){
+      const a = i/3*TAU + v.wob*0.4;
+      X.beginPath(); X.arc(Math.cos(a)*v.r*0.4, Math.sin(a)*v.r*0.4, v.r*0.22, 0, TAU); X.fill();
+    }
+  }
+
+  // 扑咬预警
+  if (v.lunge > 0){
+    X.strokeStyle = 'rgba(255,120,100,' + (0.55 + 0.35*Math.sin(T*26)) + ')';
+    X.lineWidth = 2.4;
+    X.beginPath(); X.arc(0, 0, v.r + 9, 0, TAU); X.stroke();
+    X.strokeStyle = 'rgba(255,160,140,0.5)'; X.lineWidth = 1.4;
+    X.beginPath(); X.arc(0, 0, v.r + 14, 0, TAU); X.stroke();
+  }
+
+  // 血条
+  if (!flash && v.hp < v.hpMax){
+    const w = Math.max(24, v.r*2);
+    X.fillStyle = 'rgba(0,0,0,0.55)'; X.fillRect(-w/2, -v.r-13, w, 3.5);
+    X.fillStyle = '#E2564B'; X.fillRect(-w/2, -v.r-13, w*clamp(v.hp/v.hpMax,0,1), 3.5);
+  }
+  X.restore();
+}
+
+function drawAlly(a){
+  if (a.dead) return;
+  if (a.y < camY - 200 || a.y > camY + CH + 200) return;
+  if (a.x < camX - 200 || a.x > camX + CW + 200) return;
+
+  X.save();
+  X.translate(a.x, a.y);
+  X.globalAlpha = a.life < 3 ? (0.4 + 0.6*Math.abs(Math.sin(T*8))) : 1;
+
+  if (a.t === 'macro'){
+    X.fillStyle = 'rgba(240,192,138,0.85)';
+    X.beginPath();
+    for (let i=0;i<=18;i++){
+      const ang = i/18*TAU;
+      const rad = a.r*(1 + 0.18*Math.sin(ang*4 + T*1.6) + 0.08*Math.sin(ang*6));
+      i===0 ? X.moveTo(Math.cos(ang)*rad, Math.sin(ang)*rad) : X.lineTo(Math.cos(ang)*rad, Math.sin(ang)*rad);
+    }
+    X.closePath(); X.fill();
+    X.fillStyle = 'rgba(178,118,58,0.9)';
+    X.beginPath(); X.arc(0,0,a.r*0.55,0,TAU); X.fill();
+    X.fillStyle = 'rgba(255,240,215,0.55)';
+    for (let i=0;i<3;i++){
+      const ang = i/3*TAU + T*0.6;
+      X.beginPath(); X.arc(Math.cos(ang)*a.r*0.55, Math.sin(ang)*a.r*0.55, 3, 0, TAU); X.fill();
+    }
+  } else {
+    X.fillStyle = 'rgba(221,232,247,0.9)';
+    X.beginPath();
+    for (let i=0;i<=16;i++){
+      const ang = i/16*TAU;
+      const rad = a.r*(1 + 0.15*Math.sin(ang*3 + T*2) + 0.07*Math.sin(ang*5));
+      i===0 ? X.moveTo(Math.cos(ang)*rad, Math.sin(ang)*rad) : X.lineTo(Math.cos(ang)*rad, Math.sin(ang)*rad);
+    }
+    X.closePath(); X.fill();
+    X.fillStyle = C.wbcCore;
+    for (let i=0;i<3;i++){
+      const ang = i/3*TAU + T*0.8;
+      X.beginPath(); X.arc(Math.cos(ang)*3.6, Math.sin(ang)*3.6, 3.2, 0, TAU); X.fill();
+    }
+  }
+  X.globalAlpha = 1;
+
+  // 血条
+  const w = a.r*2.2;
+  X.fillStyle = 'rgba(0,0,0,0.4)'; X.fillRect(-w/2, -a.r-10, w, 3);
+  X.fillStyle = 'rgba(143,232,255,0.85)'; X.fillRect(-w/2, -a.r-10, w*clamp(a.hp/a.hpMax,0,1), 3);
+  X.restore();
+}
+
+function drawBoss(){
+  if (!boss || boss.dead) return;
+  const bx = boss.x, by = boss.y;
+  if (by < camY - 760 || by > camY + CH + 760) return;
+
+  // 伪足
+  const ax2 = bx + Math.cos(boss.arm) * 520, ay2 = by + Math.sin(boss.arm) * 520;
+  X.strokeStyle = 'rgba(255,120,170,0.32)';
+  X.lineWidth = 16; X.lineCap = 'round';
+  X.beginPath(); X.moveTo(bx,by); X.lineTo(ax2,ay2); X.stroke();
+  X.strokeStyle = 'rgba(255,190,215,0.7)';
+  X.lineWidth = 4;
+  X.beginPath(); X.moveTo(bx,by); X.lineTo(ax2,ay2); X.stroke();
+
+  // 本体
+  const g = X.createRadialGradient(bx,by,10,bx,by,130);
+  g.addColorStop(0,'rgba(255,150,190,0.9)');
+  g.addColorStop(0.5,'rgba(176,58,91,0.72)');
+  g.addColorStop(1,'rgba(90,20,45,0)');
+  X.fillStyle = g;
+  X.beginPath(); X.arc(bx,by,130,0,TAU); X.fill();
+
+  X.fillStyle = boss.hitT > 0 ? '#FFFFFF' : 'rgba(226,86,75,0.88)';
+  X.beginPath();
+  for (let i=0;i<=26;i++){
+    const a = i/26*TAU;
+    const rad = 66*(1 + 0.18*Math.sin(a*4 + boss.t*1.1));
+    i===0 ? X.moveTo(bx+Math.cos(a)*rad, by+Math.sin(a)*rad)
+          : X.lineTo(bx+Math.cos(a)*rad, by+Math.sin(a)*rad);
+  }
+  X.closePath(); X.fill();
+  X.strokeStyle = 'rgba(255,180,200,0.5)'; X.lineWidth = 2; X.stroke();
+
+  // 核心 / 护盾
+  if (boss.phase === 'core'){
+    const pulse = 0.7 + 0.3*Math.sin(T*6);
+    X.fillStyle = 'rgba(255,240,180,' + (0.55*pulse) + ')';
+    X.beginPath(); X.arc(bx, by, 34, 0, TAU); X.fill();
+    X.fillStyle = '#FFF6D8';
+    X.beginPath(); X.arc(bx, by, 16, 0, TAU); X.fill();
+    const w = 180;
+    X.fillStyle = 'rgba(0,0,0,0.6)'; X.fillRect(bx-w/2, by-104, w, 7);
+    X.fillStyle = '#FF7BD6'; X.fillRect(bx-w/2, by-104, w*clamp(boss.hp/boss.hpMax,0,1), 7);
+    X.fillStyle = '#FFD9EE'; X.font = '600 12px sans-serif'; X.textAlign = 'center';
+    X.fillText('病毒母体核心', bx, by-114);
+  } else {
+    X.strokeStyle = 'rgba(255,180,220,' + (0.3 + 0.2*Math.sin(T*4)) + ')';
+    X.lineWidth = 3;
+    X.beginPath(); X.arc(bx, by, 84, 0, TAU); X.stroke();
+  }
+
+  // 复制核
+  for (const nd of boss.nodes){
+    if (nd.dead) continue;
+    const pulse = 0.6 + 0.4*Math.sin(T*4 + nd.x);
+    X.fillStyle = 'rgba(255,120,210,' + (0.16*pulse) + ')';
+    X.beginPath(); X.arc(nd.x, nd.y, nd.r*2.6, 0, TAU); X.fill();
+    X.fillStyle = nd.hitT > 0 ? '#FFFFFF' : '#FF7BD6';
+    X.beginPath();
+    for (let i=0;i<6;i++){
+      const a = i/6*TAU + T*0.8;
+      const rad = nd.r*(1 + 0.12*Math.sin(T*6+i));
+      i===0 ? X.moveTo(nd.x+Math.cos(a)*rad, nd.y+Math.sin(a)*rad)
+            : X.lineTo(nd.x+Math.cos(a)*rad, nd.y+Math.sin(a)*rad);
+    }
+    X.closePath(); X.fill();
+    X.strokeStyle = 'rgba(255,210,240,0.9)'; X.lineWidth = 2; X.stroke();
+
+    const w = 66;
+    X.fillStyle = 'rgba(0,0,0,0.6)'; X.fillRect(nd.x-w/2, nd.y-nd.r-17, w, 5);
+    X.fillStyle = '#FF7BD6'; X.fillRect(nd.x-w/2, nd.y-nd.r-17, w*clamp(nd.hp/nd.hpMax,0,1), 5);
+    X.fillStyle = 'rgba(255,220,240,0.6)'; X.font = '500 10px sans-serif'; X.textAlign = 'center';
+    X.fillText('复制核', nd.x, nd.y-nd.r-22);
+  }
+}
+
+function drawBullets(){
+  for (const b of bullets){
+    X.save(); X.translate(b.x, b.y);
+    X.fillStyle = 'rgba(143,232,255,0.26)';
+    X.beginPath(); X.ellipse(-8,0,12,4,0,0,TAU); X.fill();
+    X.fillStyle = C.granule;
+    X.beginPath(); X.arc(0,0,4.2,0,TAU); X.fill();
+    X.fillStyle = '#FFFFFF';
+    X.beginPath(); X.arc(1.4,0,1.7,0,TAU); X.fill();
+    X.restore();
+  }
+  for (const b of vbullets){
+    if (!b.friendly){
+      X.fillStyle = 'rgba(255,120,140,0.22)';
+      X.beginPath(); X.arc(b.x, b.y, b.r*2.1, 0, TAU); X.fill();
+    }
+    X.fillStyle = b.col || C.virus;
+    X.beginPath(); X.arc(b.x, b.y, b.r, 0, TAU); X.fill();
+  }
+}
+
+function drawParticles(){
+  for (const p of parts){
+    const k = 1 - p.t/p.life;
+    if (p.ring){
+      X.globalAlpha = 0.3*k;
+      X.strokeStyle = p.c; X.lineWidth = 3;
+      X.beginPath(); X.arc(p.x, p.y, p.r*(1.2-k*0.6), 0, TAU); X.stroke();
+    } else {
+      X.globalAlpha = k;
+      X.fillStyle = p.c;
+      X.beginPath(); X.arc(p.x, p.y, p.r*k, 0, TAU); X.fill();
+    }
+  }
+  X.globalAlpha = 1;
+  X.textAlign = 'center';
+  for (const f of floats){
+    const k = 1 - f.t/f.life;
+    X.globalAlpha = k;
+    X.font = (f.small ? '500 13px' : '600 16px') + ' sans-serif';
+    X.fillStyle = f.c;
+    X.fillText(f.txt, f.x, f.y - f.t*20);
+  }
+  X.globalAlpha = 1;
+}
+
+function drawPlayer(){
+  const px = P.x, py = P.y;
+  const R0 = P.r + Math.min(3.4, P.level * 0.16);
+  const t = T;
+
+  // 运动拖尾
+  const sp = Math.hypot(P.vx, P.vy);
+  if (sp > 120){
+    for (let i=1;i<=3;i++){
+      X.globalAlpha = 0.10 - i*0.02;
+      X.fillStyle = C.player;
+      X.beginPath(); X.arc(px - P.vx*0.02*i, py - P.vy*0.02*i, R0*(1-i*0.1), 0, TAU); X.fill();
+    }
+    X.globalAlpha = 1;
+  }
+
+  // 再生光晕
+  if (P.regen > 0){
+    const r2 = R0 + 12 + Math.sin(t*2)*3;
+    const g = X.createRadialGradient(px,py,R0,px,py,r2+10);
+    g.addColorStop(0,'rgba(74,222,128,0.18)');
+    g.addColorStop(1,'rgba(74,222,128,0)');
+    X.fillStyle = g; X.beginPath(); X.arc(px,py,r2+10,0,TAU); X.fill();
+  }
+
+  // 干扰素环
+  if (P.slow > 0){
+    X.strokeStyle = 'rgba(143,183,255,0.22)'; X.lineWidth = 1.5;
+    X.setLineDash([6,8]);
+    X.beginPath(); X.arc(px,py,126 + Math.sin(t*1.5)*4,0,TAU); X.stroke();
+    X.setLineDash([]);
+  }
+
+  // 伪足
+  const nArm = 5;
+  X.fillStyle = 'rgba(143,232,255,0.55)';
+  for (let i=0;i<nArm;i++){
+    const a = i/nArm*TAU + Math.sin(t*0.7 + i)*0.18;
+    const len = R0 + 9 + Math.sin(t*3 + i*1.7)*3 + (i === 0 ? Math.min(12, sp*0.045) : 0);
+    X.beginPath();
+    X.ellipse(px + Math.cos(a)*len*0.72, py + Math.sin(a)*len*0.72,
+              len*0.36, len*0.2, a, 0, TAU);
+    X.fill();
+  }
+
+  // 胞体
+  const white = P.invuln > 0 && Math.floor(t*20) % 2;
+  X.beginPath();
+  const N = 26;
+  for (let i=0;i<=N;i++){
+    const a = i/N*TAU;
+    const rad = R0*(1 + 0.10*Math.sin(a*5 + t*3.0) + 0.05*Math.sin(a*3 - t*2.2));
+    const xx = px+Math.cos(a)*rad, yy = py+Math.sin(a)*rad;
+    i===0 ? X.moveTo(xx,yy) : X.lineTo(xx,yy);
+  }
+  X.closePath();
+  X.fillStyle = white ? 'rgba(255,255,255,0.95)' : 'rgba(143,232,255,0.86)';
+  X.fill();
+  X.strokeStyle = 'rgba(235,251,255,0.8)'; X.lineWidth = 1.6; X.stroke();
+
+  // 细胞核（分叶）
+  const lobes = 2 + Math.min(2, Math.floor(P.level/6));
+  X.save();
+  X.translate(px, py);
+  X.rotate(t*0.5);
+  X.fillStyle = C.nucleus;
+  for (let i=0;i<lobes;i++){
+    const a = i/lobes*TAU;
+    X.beginPath();
+    X.ellipse(Math.cos(a)*R0*0.28, Math.sin(a)*R0*0.28, R0*0.34, R0*0.26, a, 0, TAU);
+    X.fill();
+  }
+  X.restore();
+
+  // 溶酶体颗粒
+  const ng = 4 + (upTaken['lyso'] || 0)*2 + (upTaken['multi'] || 0);
+  for (let i=0;i<ng;i++){
+    const a = i/ng*TAU + t*0.9;
+    X.fillStyle = 'rgba(235,251,255,0.85)';
+    X.beginPath();
+    X.arc(px+Math.cos(a)*R0*0.62, py+Math.sin(a)*R0*0.62, 1.8, 0, TAU);
+    X.fill();
+  }
+
+  // 膜增厚
+  if ((upTaken['memb'] || 0) > 0){
+    X.strokeStyle = 'rgba(168,200,255,0.45)'; X.lineWidth = 1.6;
+    X.beginPath(); X.arc(px, py, R0 + 6, 0, TAU); X.stroke();
+  }
+
+  // 吞噬冷却环
+  const eatPct = 1 - clamp(P.eatCd / (6.2 * P.eatCdMul), 0, 1);
+  if (eatPct < 1){
+    X.strokeStyle = 'rgba(182,242,255,0.35)'; X.lineWidth = 2.4;
+    X.beginPath(); X.arc(px, py, R0 + 13, -Math.PI/2, -Math.PI/2 + TAU*eatPct); X.stroke();
+  } else {
+    X.strokeStyle = 'rgba(182,242,255,0.16)'; X.lineWidth = 2;
+    X.beginPath(); X.arc(px, py, R0 + 13, 0, TAU); X.stroke();
+  }
+
+  // 瞄准线
+  X.strokeStyle = 'rgba(143,232,255,0.14)'; X.lineWidth = 1;
+  X.setLineDash([5,7]);
+  X.beginPath();
+  X.moveTo(px, py);
+  X.lineTo(px + Math.cos(P.face)*90, py + Math.sin(P.face)*90);
+  X.stroke();
+  X.setLineDash([]);
+}
+
+// ---------------- 绘制：界面 ----------------
+function rrect(x,y,w,h,r){
+  X.beginPath();
+  X.moveTo(x+r,y);
+  X.lineTo(x+w-r,y); X.quadraticCurveTo(x+w,y,x+w,y+r);
+  X.lineTo(x+w,y+h-r); X.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  X.lineTo(x+r,y+h); X.quadraticCurveTo(x,y+h,x,y+h-r);
+  X.lineTo(x,y+r); X.quadraticCurveTo(x,y,x+r,y);
+  X.closePath();
+}
+
+function drawHud(){
+  X.fillStyle = 'rgba(6,8,12,0.8)'; X.fillRect(0,0,CW,76);
+  X.strokeStyle = 'rgba(255,255,255,0.06)'; X.lineWidth = 1;
+  X.beginPath(); X.moveTo(0,76); X.lineTo(CW,76); X.stroke();
+
+  // 生命
+  const hw = 280;
+  X.fillStyle = '#151A22'; X.fillRect(20,20,hw,20);
+  const hf = clamp(P.hp/P.maxHp, 0, 1);
+  const hg = X.createLinearGradient(20,0,20+hw,0);
+  hg.addColorStop(0, hf > 0.35 ? '#4ADE80' : '#E24B4A');
+  hg.addColorStop(1, hf > 0.35 ? '#9BF6C0' : '#FF8A7A');
+  X.fillStyle = hg; X.fillRect(20,20,hw*hf,20);
+  X.strokeStyle = '#06080C'; X.lineWidth = 2; X.strokeRect(20,20,hw,20);
+  X.fillStyle = '#E8EDF2'; X.font = '600 13px sans-serif'; X.textAlign = 'left';
+  X.fillText('细胞活性 ' + Math.ceil(P.hp) + ' / ' + P.maxHp, 28, 35);
+
+  // 分化经验
+  X.fillStyle = '#151A22'; X.fillRect(20,48,hw,8);
+  X.fillStyle = C.xp; X.fillRect(20,48,hw*clamp(P.xp/P.need,0,1),8);
+  X.fillStyle = C.mute; X.font = '500 11px sans-serif';
+  X.fillText('分化 Lv.' + P.level, 20+hw+12, 57);
+
+  // 感染度
+  const aw = 210, ax = CW - 20 - aw;
+  X.fillStyle = '#151A22'; X.fillRect(ax, 20, aw, 16);
+  const af = clamp(infect/100, 0, 1);
+  const ag = X.createLinearGradient(ax,0,ax+aw,0);
+  ag.addColorStop(0, af > 0.7 ? '#E24B4A' : '#C9655E');
+  ag.addColorStop(1, af > 0.7 ? '#FF8A7A' : '#FF9B7A');
+  X.fillStyle = ag; X.fillRect(ax, 20, aw*af, 16);
+  X.strokeStyle = '#06080C'; X.lineWidth = 2; X.strokeRect(ax,20,aw,16);
+  X.fillStyle = '#FFE3E0'; X.font = '600 12px sans-serif'; X.textAlign = 'right';
+  X.fillText('感染度 ' + Math.round(infect) + '%', CW-26, 33);
+  if (af > 0.7 && Math.floor(T*4) % 2){
+    X.strokeStyle = 'rgba(255,120,110,0.8)'; X.lineWidth = 2;
+    X.strokeRect(ax-2, 18, aw+4, 20);
+  }
+
+  // 病毒进化
+  X.textAlign = 'right';
+  X.fillStyle = C.mute; X.font = '500 11px sans-serif';
+  X.fillText('病毒进化 Lv.' + evo + ' / 5', CW-20, 50);
+  for (let i=0;i<5;i++){
+    X.fillStyle = i < evo ? '#E2564B' : 'rgba(255,255,255,0.12)';
+    X.beginPath(); X.arc(CW-170+i*16, 45, 3.2, 0, TAU); X.fill();
+  }
+
+  // 区域名
+  const z = zoneAt(P.y);
+  X.textAlign = 'center';
+  X.fillStyle = C.line; X.font = '600 15px sans-serif';
+  X.fillText(z.n, CW/2, 30);
+  X.fillStyle = C.mute; X.font = '500 11px sans-serif';
+  X.fillText(z.e, CW/2, 47);
+
+  // 趋化信号冷却
+  X.textAlign = 'center';
+  X.fillStyle = callCd > 0 ? 'rgba(143,232,255,0.35)' : 'rgba(143,232,255,0.9)';
+  X.font = '600 12px sans-serif';
+  X.fillText(callCd > 0 ? ('趋化 ' + callCd.toFixed(1) + 's') : '趋化信号 就绪 [Q]', CW/2, 68);
+
+  // 右侧进度
+  const px = CW - 34, py0 = 92, ph = CH - 196;
+  X.fillStyle = 'rgba(255,255,255,0.08)'; X.fillRect(px, py0, 8, ph);
+  const prog = clamp(1 - P.y/WORLD_H, 0, 1);
+  X.fillStyle = 'rgba(143,232,255,0.55)'; X.fillRect(px, py0 + ph*(1-prog), 8, ph*prog);
+  X.fillStyle = '#FFFFFF'; X.beginPath(); X.arc(px+4, py0 + ph*(1-prog), 4.5, 0, TAU); X.fill();
+  // 屏障标记
+  const bY = py0 + ph*(1 - ESCAPE_Y/WORLD_H);
+  X.strokeStyle = 'rgba(255,120,120,0.8)'; X.lineWidth = 2;
+  X.beginPath(); X.moveTo(px-6, bY); X.lineTo(px+14, bY); X.stroke();
+  X.fillStyle = C.mute; X.font = '500 10px sans-serif'; X.textAlign = 'center';
+  for (let i=0;i<ZONES.length;i++){
+    const zy = py0 + ph*(ZONES[i].top + ZONES[i].h/2)/WORLD_H;
+    X.fillText(ZONES[i].n.slice(0,2), px+4, clamp(zy, py0+8, py0+ph-4));
+  }
+
+  // 友军
+  X.textAlign = 'left';
+  X.fillStyle = 'rgba(221,232,247,0.7)'; X.font = '500 11px sans-serif';
+  X.fillText('友军 ' + allies.length, 20, 96);
+  for (let i=0;i<allies.length && i<8;i++){
+    const a = allies[i];
+    X.fillStyle = a.t === 'macro' ? C.macro : C.wbc;
+    X.beginPath(); X.arc(66 + i*13, 92, 4, 0, TAU); X.fill();
+  }
+
+  // 升级清单
+  let my = 122;
+  X.font = '500 11px sans-serif';
+  for (const u of UPS){
+    const n = upTaken[u.k] || 0;
+    if (!n) continue;
+    X.fillStyle = u.c;
+    X.fillText('● ' + u.n + (n > 1 ? ' ×' + n : ''), 20, my);
+    my += 17;
+  }
+
+  // 提示
+  if (hintT > 0){
+    X.textAlign = 'center';
+    X.globalAlpha = clamp(hintT, 0, 1);
+    X.fillStyle = C.gold; X.font = '600 19px sans-serif';
+    X.fillText(hint, CW/2, 112);
+    X.globalAlpha = 1;
+  }
+
+  // 病毒进化横幅
+  if (bannerT > 0){
+    const a = clamp(bannerT, 0, 1);
+    X.globalAlpha = a;
+    X.fillStyle = 'rgba(40,8,14,0.86)';
+    X.fillRect(CW/2 - 260, 146, 520, 54);
+    X.strokeStyle = 'rgba(226,86,75,0.7)'; X.lineWidth = 2;
+    X.strokeRect(CW/2 - 260, 146, 520, 54);
+    X.textAlign = 'center';
+    X.fillStyle = '#FF9B7A'; X.font = '700 20px sans-serif';
+    X.fillText(banner, CW/2, 181);
+    X.globalAlpha = 1;
+  }
+
+  // 底部
+  X.fillStyle = 'rgba(6,8,12,0.62)'; X.fillRect(0,CH-30,CW,30);
+  X.fillStyle = C.mute; X.font = '400 12px sans-serif'; X.textAlign = 'left';
+  X.fillText('WASD 移动　左键 释放颗粒　空格 / 右键 吞噬　Q 趋化信号　Shift 冲刺　P 暂停　M 静音', 20, CH-10);
+  X.textAlign = 'right';
+  X.fillText('净化 ' + kills + '　时长 ' + runTime.toFixed(0) + 's', CW-20, CH-10);
+}
+
+function drawMutationPanel(){
+  X.fillStyle = 'rgba(4,6,10,0.78)'; X.fillRect(0,0,CW,CH);
+  X.textAlign = 'center';
+  X.fillStyle = C.cyan; X.font = '600 13px sans-serif';
+  X.fillText('D I F F E R E N T I A T I O N', CW/2, 168);
+  X.fillStyle = C.line; X.font = '700 30px sans-serif';
+  X.fillText('分化：选择一项能力', CW/2, 208);
+  X.fillStyle = C.mute; X.font = '400 13px sans-serif';
+  X.fillText('按 1 / 2 / 3 或直接点击卡片', CW/2, 232);
+
+  const bw = 300, gap = 26, n = upChoices.length;
+  const total = bw*n + gap*(n-1), x0 = (CW-total)/2, by = 258, bh = 268;
+  for (let i=0;i<n;i++){
+    const u = upChoices[i];
+    const bx = x0 + i*(bw+gap);
+    const hover = mouse.x > bx && mouse.x < bx+bw && mouse.y > by && mouse.y < by+bh;
+    rrect(bx, by, bw, bh, 12);
+    X.fillStyle = hover ? 'rgba(143,232,255,0.10)' : 'rgba(18,24,32,0.96)';
+    X.fill();
+    X.strokeStyle = hover ? u.c : 'rgba(255,255,255,0.12)';
+    X.lineWidth = hover ? 2 : 1; X.stroke();
+
+    X.fillStyle = u.c;
+    X.beginPath(); X.arc(bx + 30, by + 38, 8, 0, TAU); X.fill();
+
+    X.textAlign = 'left';
+    X.fillStyle = C.line; X.font = '600 20px sans-serif';
+    X.fillText(u.n, bx + 50, by + 45);
+
+    X.fillStyle = C.mute; X.font = '400 13px sans-serif';
+    X.fillText(u.d, bx + 26, by + 86);
+
+    const lv = upTaken[u.k] || 0;
+    X.fillStyle = 'rgba(255,255,255,0.08)';
+    X.fillRect(bx + 26, by + 110, bw - 52, 6);
+    X.fillStyle = u.c;
+    X.fillRect(bx + 26, by + 110, (bw - 52) * (lv / u.max), 6);
+    X.fillStyle = C.mute; X.font = '500 11px sans-serif';
+    X.fillText('已叠加 ' + lv + ' / ' + u.max, bx + 26, by + 134);
+
+    X.fillStyle = 'rgba(255,255,255,0.05)';
+    X.fillRect(bx + 26, by + 150, bw - 52, 1);
+
+    X.fillStyle = C.mute; X.font = '400 12px sans-serif';
+    const lines = u.k === 'calln' || u.k === 'callm'
+      ? ['每 13 秒一次趋化信号', '直接改变场内友军数量']
+      : (u.k === 'eat' || u.k === 'eatcd' ? ['吞噬：空格 / 右键', '近距离清场并压低感染度']
+      : ['即时生效', '可叠加到上限']);
+    for (let k=0;k<lines.length;k++) X.fillText(lines[k], bx + 26, by + 176 + k*20);
+
+    X.fillStyle = u.c; X.font = '600 13px sans-serif';
+    X.fillText('按 ' + (i+1) + ' 选择', bx + 26, by + bh - 24);
+  }
+}
+
+function drawTitle(){
+  const g = X.createLinearGradient(0,0,0,CH);
+  g.addColorStop(0,'#081426'); g.addColorStop(0.55,'#0B1A28'); g.addColorStop(1,'#06080C');
+  X.fillStyle = g; X.fillRect(0,0,CW,CH);
+
+  // 背景细胞剪影
+  for (let i=0;i<18;i++){
+    const x = (i*173 + 60) % CW;
+    const y = (i*97 + 40) % CH;
+    X.globalAlpha = 0.05;
+    X.fillStyle = i%3 ? '#8FE8FF' : '#E2564B';
+    X.beginPath(); X.arc(x, y, 16 + (i%5)*9, 0, TAU); X.fill();
+    X.globalAlpha = 1;
+  }
+
+  X.textAlign = 'center';
+  X.fillStyle = C.cyan; X.font = '500 13px sans-serif';
+  X.fillText('I M M U N E   A S C E N T', CW/2, 92);
+
+  X.fillStyle = '#EAFBFF'; X.font = '700 52px sans-serif';
+  X.fillText('细胞上行', CW/2, 152);
+
+  X.fillStyle = C.mute; X.font = '400 15px sans-serif';
+  X.fillText('你是一枚免疫细胞。病毒从脚底伤口钻进来，正沿着组织往上跑 ——', CW/2, 190);
+  X.fillText('在它们冲破血脑屏障之前，追上、吞噬、清干净。', CW/2, 214);
+
+  const bw = 330, gap = 24, x0 = (CW - (bw*3 + gap*2))/2, by = 248, bh = 190;
+  for (let i=0;i<3;i++){
+    const c = CELLS[i];
+    const bx = x0 + i*(bw+gap);
+    const hover = mouse.x > bx && mouse.x < bx+bw && mouse.y > by && mouse.y < by+bh;
+    rrect(bx, by, bw, bh, 12);
+    X.fillStyle = hover ? 'rgba(143,232,255,0.10)' : 'rgba(14,20,28,0.92)';
+    X.fill();
+    X.strokeStyle = hover ? c.col : 'rgba(255,255,255,0.12)';
+    X.lineWidth = hover ? 2 : 1; X.stroke();
+
+    X.textAlign = 'left';
+    X.fillStyle = c.col; X.font = '500 11px sans-serif';
+    X.fillText(['BALANCED','BRUISER','SUPPORT'][i], bx + 22, by + 30);
+    X.fillStyle = C.line; X.font = '600 22px sans-serif';
+    X.fillText(c.n, bx + 22, by + 60);
+    X.fillStyle = C.mute; X.font = '400 12px sans-serif';
+    X.fillText(c.sub, bx + 22, by + 82);
+
+    X.fillStyle = C.mute; X.font = '400 12px sans-serif';
+    const lines = wrapText(c.tip, bw - 44, 12);
+    for (let k=0;k<lines.length;k++) X.fillText(lines[k], bx + 22, by + 108 + k*18);
+
+    X.fillStyle = c.col; X.font = '600 13px sans-serif';
+    X.fillText('按 ' + (i+1) + ' 开始', bx + 22, by + bh - 20);
+  }
+
+  X.textAlign = 'center';
+  X.fillStyle = C.mute; X.font = '400 13px sans-serif';
+  X.fillText('WASD 移动　鼠标瞄准 · 左键释放溶酶体颗粒　空格 / 右键 吞噬　Q 召唤白细胞与巨噬细胞　Shift 冲刺', CW/2, 486);
+
+  // 三条规则
+  const rules = [
+    ['病毒向上逃', '它们不会追你，只会往大脑跑。脱离你 1500px 就算扩散，感染度上涨。'],
+    ['感染度 100% = 失守', '感染度越高，病毒生命与伤害越强。击杀与吞噬能把它压回去。'],
+    ['病毒会进化', '每 14–17 秒进化一级，共 5 级：荚膜、快速复制、神经嗜性、刺突、巨型聚合。'],
+    ['贴近会被反咬', '病毒被逼到身边会蓄力扑咬（红环预警）；荚膜与巨型病毒还会远程排毒。']
+  ];
+  for (let i=0;i<rules.length;i++){
+    const y = 532 + i*32;
+    X.textAlign = 'right';
+    X.fillStyle = C.gold; X.font = '600 13px sans-serif';
+    X.fillText(rules[i][0], CW/2 - 16, y);
+    X.textAlign = 'left';
+    X.fillStyle = C.mute; X.font = '400 12.5px sans-serif';
+    X.fillText(rules[i][1], CW/2 - 2, y);
+  }
+
+  X.textAlign = 'center';
+  X.fillStyle = 'rgba(143,232,255,0.5)'; X.font = '500 12px sans-serif';
+  X.fillText('目标：抵达血脑屏障，击碎病毒母体的三处复制核，再摧毁核心', CW/2, CH - 26);
+}
+
+function wrapText(s, maxW, size){
+  const out = [];
+  let line = '';
+  for (const ch of s){
+    const test = line + ch;
+    if (X.measureText(test).width > maxW && line){ out.push(line); line = ch; }
+    else line = test;
+  }
+  if (line) out.push(line);
+  return out;
+}
+
+function drawPause(){
+  X.fillStyle = 'rgba(4,6,10,0.7)'; X.fillRect(0,0,CW,CH);
+  X.textAlign = 'center';
+  X.fillStyle = C.line; X.font = '700 34px sans-serif';
+  X.fillText('已暂停', CW/2, CH/2 - 10);
+  X.fillStyle = C.mute; X.font = '400 14px sans-serif';
+  X.fillText('按 P 或 Esc 继续', CW/2, CH/2 + 26);
+}
+
+function drawOver(){
+  X.fillStyle = 'rgba(20,4,8,0.82)'; X.fillRect(0,0,CW,CH);
+  X.textAlign = 'center';
+  X.fillStyle = '#FF8A7A'; X.font = '700 40px sans-serif';
+  X.fillText('防线失守', CW/2, 250);
+  X.fillStyle = C.line; X.font = '400 15px sans-serif';
+  X.fillText(endReason, CW/2, 292);
+  X.fillStyle = C.mute; X.font = '400 14px sans-serif';
+  X.fillText('净化病毒 ' + kills + ' 个　推进 ' + Math.round((1 - P.y/WORLD_H)*100) + '%　时长 ' + runTime.toFixed(0) + 's', CW/2, 330);
+  X.fillStyle = C.cyan; X.font = '600 15px sans-serif';
+  X.fillText('按 R 或 Enter 回到选择界面', CW/2, 386);
+}
+
+function drawWin(){
+  X.fillStyle = 'rgba(4,14,12,0.84)'; X.fillRect(0,0,CW,CH);
+  X.textAlign = 'center';
+  X.fillStyle = '#9BF6C0'; X.font = '700 40px sans-serif';
+  X.fillText('屏障守住了', CW/2, 250);
+  X.fillStyle = C.line; X.font = '400 15px sans-serif';
+  X.fillText('病毒母体崩解，脑组织没有被突破。', CW/2, 292);
+  X.fillStyle = C.mute; X.font = '400 14px sans-serif';
+  X.fillText('净化病毒 ' + kills + ' 个　用时 ' + runTime.toFixed(0) + 's　分化等级 ' + P.level, CW/2, 330);
+  X.fillStyle = C.gold; X.font = '600 15px sans-serif';
+  X.fillText('感染度残留 ' + Math.round(infect) + '%　按 R 或 Enter 再来一局', CW/2, 372);
+}
+
+// ---------------- 绘制入口 ----------------
+function draw(){
+  if (screen === 'title'){ drawTitle(); return; }
+
+  drawBackground();
+
+  X.save();
+  if (shake > 0.2) X.translate(rr(-shake,shake), rr(-shake,shake));
+  X.translate(-camX, -camY);
+
+  drawEscapeLine();
+  drawWalls();
+  drawParticles();
+  for (const v of viruses) drawVirus(v);
+  for (const a of allies) drawAlly(a);
+  drawBoss();
+  drawBullets();
+  drawPlayer();
+
+  X.restore();
+
+  if (hurtFlash > 0){
+    X.fillStyle = 'rgba(255,60,60,' + (hurtFlash*0.42) + ')';
+    X.fillRect(0,0,CW,CH);
+  }
+  if (flash > 0){
+    X.fillStyle = 'rgba(255,255,255,' + (flash*0.55) + ')';
+    X.fillRect(0,0,CW,CH);
+  }
+
+  drawHud();
+
+  if (screen === 'upgrade') drawMutationPanel();
+  else if (screen === 'pause') drawPause();
+  else if (screen === 'over') drawOver();
+  else if (screen === 'win') drawWin();
+}
+
+// ---------------- 循环 ----------------
+function loop(now){
+  if (!lastT) lastT = now;
+  let dt = (now - lastT) / 1000;
+  lastT = now;
+  dt = clamp(dt, 0, 0.05);
+
+  update(dt);
+  draw();
+
+  requestAnimationFrame(loop);
+}
+let lastT = 0;
+
+CV.addEventListener('click', () => {
+  if (screen === 'title'){
+    const bw = 330, gap = 24, x0 = (CW - (bw*3 + gap*2))/2, by = 248, bh = 190;
+    for (let i=0;i<3;i++){
+      const bx = x0 + i*(bw+gap);
+      if (mouse.x > bx && mouse.x < bx+bw && mouse.y > by && mouse.y < by+bh) startRun(CELLS[i]);
+    }
+  } else if (screen === 'upgrade'){
+    const bw = 300, gap = 26, n = upChoices.length;
+    const total = bw*n + gap*(n-1), x0 = (CW-total)/2, by = 258, bh = 268;
+    for (let i=0;i<n;i++){
+      const bx = x0 + i*(bw+gap);
+      if (mouse.x > bx && mouse.x < bx+bw && mouse.y > by && mouse.y < by+bh) chooseUp(i);
+    }
+  }
+});
+
+// 吞噬与趋化：按键 + 右键
+addEventListener('keydown', e => {
+  if (screen !== 'play') return;
+  const k = e.key.toLowerCase();
+  if (k === ' ') doEat();
+  if (k === 'q') summonAllies();
+});
+CV.addEventListener('mousedown', ev => {
+  if (screen !== 'play') return;
+  if (ev.button === 2) doEat();
+});
+
+requestAnimationFrame(loop);
+
+// 测试钩子
+window.__g = {
+  get state(){ return screen; },
+  get player(){ return P; },
+  get viruses(){ return viruses; },
+  get allies(){ return allies; },
+  get boss(){ return boss; },
+  get infection(){ return infect; },
+  get evo(){ return evo; },
+  get upgradeChoices(){ return upChoices; },
+  get taken(){ return upTaken; },
+  startRun, reset, update, draw, spawnVirus, spawnBoss, damageVirus, hurtPlayer,
+  gainXp, chooseUp, doEat, summonAllies, defeatBoss,
+  setScreen: s => { screen = s; },
+  setInfection: v => { infect = v; },
+  setEvo: v => { evo = v; },
+  forceLevel: () => { P.xp = P.need; gainXp(0); },
+  corridor, zoneAt, CELLS, ZONES, UPS, VTYPES, EVOS, WORLD_H, WORLD_W, ESCAPE_Y
+};
+</script>
+</body>
+</html>
