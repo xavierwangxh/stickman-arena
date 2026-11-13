@@ -545,7 +545,7 @@ function updatePlayer(dt){
 
 function updateShooting(dt){
   if (P.cd > 0) P.cd -= dt;
-  const wants = mouse.down || keys[' '];
+  const wants = mouse.down;            // 空格留给吞噬，不再兼任持续射击
   if (!wants) return;
   if (P.cd > 0) return;
   P.cd = P.rate * P.rateMul;
