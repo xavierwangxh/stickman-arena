@@ -81,7 +81,7 @@ const ZONES = [
 ];
 const WORLD_H = 28000;
 const WORLD_W = 2600;        // 世界比画面宽：通道可以真的左右拐，镜头横移跟拍
-function zoneIdx(y){ for (let i=0;i<ZONES.length;i++){ if (y >= ZONES[i].top) return i; } return 0; }
+function zoneIdx(y){ for (let i=ZONES.length-1;i>=0;i--){ if (y >= ZONES[i].top) return i; } return 0; }
 function zoneAt(y){ return ZONES[zoneIdx(y)]; }
 
 // 通道：不再是轻微摆动，而是「折线 + smoothstep」做出来的真拐弯
